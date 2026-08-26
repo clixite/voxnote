@@ -8,8 +8,22 @@ import {
   FakeMediaRecorder,
 } from "@/lib/recorder/test-utils";
 
-import { clearActiveRecordingMarker, writeActiveRecordingMarker } from "./activeRecordingMarker";
+import {
+  clearActiveRecordingMarker,
+  HEARTBEAT_INTERVAL_MS,
+  readActiveRecordingMarker,
+  writeActiveRecordingMarker,
+} from "./activeRecordingMarker";
 import RecorderScreen from "./RecorderScreen";
+
+const ACTIVE_RECORDING_KEY = "voxnote:active-recording";
+
+function writeForeignMarker(noteId: string, ageMs: number) {
+  window.localStorage.setItem(
+    ACTIVE_RECORDING_KEY,
+    JSON.stringify({ noteId, tabId: "un-autre-onglet", updatedAt: Date.now() - ageMs }),
+  );
+}
 
 function setSupported(...types: string[]) {
   FakeMediaRecorder.resetForTests();
@@ -360,5 +374,110 @@ describe("RecorderScreen", () => {
     const store = createFakeNoteStore();
     render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
     expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+  });
+
+  it("B4 — un marqueur frais d'un AUTRE onglet empêche la reprise (évite les seq dupliqués)", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeForeignMarker(note.id, 0); // heartbeat qui vient d'avoir lieu : onglet manifestement vivant.
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    expect(await screen.findByText(/autre onglet/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reprendre l'enregistrement/i })).not.toBeInTheDocument();
+    expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+  });
+
+  it("B4 — un marqueur périmé d'un autre onglet (mort) redevient reprenable normalement", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeForeignMarker(note.id, 5 * 60 * 1000); // 5 min sans heartbeat : bien au-delà du seuil de péremption.
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    expect(await screen.findByRole("button", { name: /reprendre l'enregistrement/i })).toBeInTheDocument();
+    expect(screen.queryByText(/autre onglet/i)).not.toBeInTheDocument();
+  });
+
+  it("B4 — le refresh du même onglet (marqueur propre) reste reprenable même s'il n'a pas encore de heartbeat récent", async () => {
+    // Cas nominal à ne surtout pas régresser : cet onglet a écrit son propre
+    // marqueur puis a rechargé la page. getTabId() (sessionStorage) renvoie
+    // le même identifiant qu'avant le refresh : le marqueur lui appartient,
+    // peu importe son âge.
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeActiveRecordingMarker(note.id); // écrit avec le vrai tabId de cet environnement de test.
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    expect(await screen.findByRole("button", { name: /reprendre l'enregistrement/i })).toBeInTheDocument();
+    expect(screen.queryByText(/autre onglet/i)).not.toBeInTheDocument();
+  });
+
+  it("S3 — supprime silencieusement une note interrompue sans aucun segment, sans bandeau", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    writeActiveRecordingMarker(note.id); // marqueur normal, mais 0 segment jamais fermé.
+    const deleteSpy = vi.spyOn(store, "deleteNote");
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    await waitFor(() => expect(deleteSpy).toHaveBeenCalledWith(note.id));
+    expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(await store.listNotes()).toHaveLength(0);
+  });
+
+  it("rafraîchit périodiquement le marqueur pendant l'enregistrement (heartbeat)", async () => {
+    vi.useFakeTimers();
+    setSupported("audio/webm;codecs=opus");
+    const store = createFakeNoteStore();
+
+    render(
+      <RecorderScreen
+        store={store}
+        getUserMedia={vi.fn(async () => createFakeMediaStream())}
+        isTypeSupported={(t) => FakeMediaRecorder.isTypeSupported(t)}
+        createMediaRecorder={fakeMediaRecorderFactory()}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+      />,
+    );
+
+    await act(async () => {
+      screen.getByRole("button", { name: /enregistrer/i }).click();
+    });
+
+    const afterStart = readActiveRecordingMarker();
+    expect(afterStart).toBeDefined();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS);
+    });
+
+    const afterHeartbeat = readActiveRecordingMarker();
+    expect(afterHeartbeat?.noteId).toBe(afterStart?.noteId);
+    expect(afterHeartbeat!.updatedAt).toBeGreaterThan(afterStart!.updatedAt);
   });
 });

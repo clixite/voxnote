@@ -8,8 +8,8 @@ export default function HomePage() {
       <header className="px-6 pt-10 text-center">
         <h1 className="text-2xl font-semibold tracking-tight">VoxNote</h1>
         <p className="mt-2 text-sm text-slate-400">
-          Enregistrez une note vocale, obtenez le texte, copiez-le ou
-          partagez-le.
+          Enregistre une note vocale, obtiens le texte, copie-le ou
+          partage-le.
         </p>
       </header>
 

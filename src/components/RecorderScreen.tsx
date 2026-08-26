@@ -13,12 +13,16 @@ import type { NoteStore } from "@/types/notes";
 
 import {
   clearActiveRecordingMarker,
+  HEARTBEAT_INTERVAL_MS,
+  isMarkerStale,
+  isOwnMarker,
   readActiveRecordingMarker,
   writeActiveRecordingMarker,
 } from "./activeRecordingMarker";
 import ErrorBanner from "./ErrorBanner";
 import { formatDuration } from "./format";
 import LevelMeter from "./LevelMeter";
+import OtherTabNotice from "./OtherTabNotice";
 import PauseResumeButton from "./PauseResumeButton";
 import RecordButton from "./RecordButton";
 import ResumeNotice, { type ResumeNoticeInfo } from "./ResumeNotice";
@@ -70,15 +74,19 @@ export default function RecorderScreen(props: RecorderScreenProps) {
 
   const [announcement, setAnnouncement] = useState("");
   const [interruptedNote, setInterruptedNote] = useState<ResumeNoticeInfo | null>(null);
+  const [recordingElsewhere, setRecordingElsewhere] = useState<{
+    noteId: string;
+    createdAt: number;
+  } | null>(null);
   const previousStateRef = useRef(recorder.state);
   const previousSegmentCountRef = useRef(recorder.segmentCount);
 
   // Détection, au montage seulement, d'une note laissée active par une
-  // session précédente (refresh, crash, onglet fermé). Voir le commentaire
-  // en tête d'activeRecordingMarker.ts pour l'argumentaire complet : le
-  // NoteStore seul ne permet pas de distinguer un arrêt propre d'un
-  // abandon, donc on s'appuie sur un marqueur posé/effacé côté client par
-  // cet écran lui-même.
+  // session précédente (refresh, crash, onglet fermé, ou un AUTRE onglet).
+  // Voir le commentaire en tête d'activeRecordingMarker.ts pour
+  // l'argumentaire complet : le NoteStore seul ne permet pas de distinguer
+  // un arrêt propre d'un abandon, donc on s'appuie sur un marqueur
+  // posé/rafraîchi/effacé côté client par cet écran lui-même.
   useEffect(() => {
     let cancelled = false;
     async function checkForInterruptedNote() {
@@ -89,9 +97,29 @@ export default function RecorderScreen(props: RecorderScreenProps) {
         store.listSegments(marker.noteId),
       ]);
       if (cancelled) return;
-      if (!note || segments.length === 0) {
-        // Note disparue, ou jamais eu de segment fermé : rien à récupérer.
+      if (!note) {
+        // Note disparue entre-temps (ex. purge) : plus rien à signaler.
         clearActiveRecordingMarker();
+        return;
+      }
+      if (segments.length === 0) {
+        // Crash avant le moindre segment fermé (S3) : il n'y a rien à
+        // reprendre, et un bandeau qui proposerait de récupérer le néant
+        // serait pire que pas de bandeau. On supprime silencieusement
+        // plutôt que de laisser une coquille vide traîner dans le store —
+        // elle apparaîtrait sinon indéfiniment dans la future liste de notes.
+        clearActiveRecordingMarker();
+        await store.deleteNote(note.id).catch(() => {});
+        return;
+      }
+      if (!isOwnMarker(marker) && !isMarkerStale(marker)) {
+        // Un AUTRE onglet tient cette note et son heartbeat est encore
+        // frais : ne jamais proposer de la reprendre ici. Deux moteurs
+        // démarrés en parallèle sur la même note produiraient des `seq`
+        // dupliqués et écraseraient un segment dans Vercel Blob (B4). Un
+        // marqueur périmé (onglet mort) ou posé par CET onglet (refresh du
+        // même onglet, cas nominal) retombe dans le cas normal ci-dessous.
+        setRecordingElsewhere({ noteId: note.id, createdAt: note.createdAt });
         return;
       }
       setInterruptedNote({
@@ -107,6 +135,22 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- volontairement une seule fois au montage : reprise après rechargement, pas un état à revalider en continu
   }, []);
+
+  // Heartbeat : rafraîchit `updatedAt` pendant toute la durée de la session
+  // (recording ET paused — un autre onglet ne doit pas croire cette note
+  // abandonnée pendant une pause), pour que la détection ci-dessus distingue
+  // un autre onglet vivant d'un autre onglet mort. Voir activeRecordingMarker.ts
+  // pour la justification des seuils.
+  useEffect(() => {
+    const sessionActive = recorder.state === "recording" || recorder.state === "paused";
+    if (!sessionActive) return;
+    const activeNoteId = recorder.noteId;
+    if (!activeNoteId) return;
+    const id = setInterval(() => {
+      writeActiveRecordingMarker(activeNoteId);
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [recorder.state, recorder.noteId]);
 
   // Marqueur de session active + wake lock, câblés sur les transitions de la
   // machine à états exposée par useRecorder.
@@ -199,6 +243,8 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       <div aria-live="polite" className="sr-only">
         {announcement}
       </div>
+
+      {recordingElsewhere && <OtherTabNotice createdAt={recordingElsewhere.createdAt} />}
 
       {interruptedNote && (
         <ResumeNotice
