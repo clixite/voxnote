@@ -15,6 +15,18 @@ import { MAX_SEGMENT_BYTES, type ApiErrorBody } from "@/types/api";
 // pour signer les jetons : runtime Node explicite, jamais edge.
 export const runtime = "nodejs";
 
+// Sans valeur explicite, `handleUpload` pose `validUntil` à une heure
+// (`node_modules/@vercel/blob/dist/client.js`). Combiné à `allowOverwrite:
+// true` ci-dessous, un jeton réutilisé pendant cette heure réussit à chaque
+// fois au lieu d'être rejeté : un porteur du mot de passe qui intercepte un
+// jeton obtient donc une fenêtre d'écritures illimitées de
+// `MAX_SEGMENT_BYTES` chacune. Le rate limiting de cette route porte sur
+// l'ÉMISSION de jetons (60 par 5 min, voir `rateLimit.ts`), pas sur leur
+// consommation : il ne borne donc pas cette fenêtre. Cinq minutes couvrent
+// largement l'upload d'un segment de 25 Mo même en 4G médiocre, et divisent
+// la fenêtre d'abus par douze par rapport au défaut du SDK.
+const UPLOAD_TOKEN_TTL_MS = 5 * 60 * 1000;
+
 function jsonError(body: ApiErrorBody, status: number): NextResponse {
   return NextResponse.json(body, { status });
 }
@@ -98,7 +110,11 @@ export async function POST(request: Request): Promise<NextResponse> {
           // Un segment peut être ré-uploadé après un échec réseau partiel
           // détecté à tort par le client (retry de la queue, Phase 3) : la
           // même clé doit alors pouvoir être réécrite plutôt que rejetée.
+          // Inoffensif seulement parce que la fenêtre de validité du jeton
+          // est courte (voir `UPLOAD_TOKEN_TTL_MS` ci-dessus) : sans elle,
+          // cette réécriture illimitée serait le vecteur d'abus principal.
           allowOverwrite: true,
+          validUntil: Date.now() + UPLOAD_TOKEN_TTL_MS,
         };
       },
     });

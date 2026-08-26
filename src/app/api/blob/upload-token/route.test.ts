@@ -1,4 +1,5 @@
 // @vitest-environment node
+import { getPayloadFromClientToken } from "@vercel/blob/client";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { resetRateLimitStateForTests } from "@/lib/blob/rateLimit";
@@ -69,6 +70,28 @@ describe("POST /api/blob/upload-token", () => {
     const json = await response.json();
     expect(json.type).toBe("blob.generate-client-token");
     expect(typeof json.clientToken).toBe("string");
+  });
+
+  it("jeton valable environ 5 minutes, pas l'heure par défaut du SDK (revue C3)", async () => {
+    vi.stubEnv("BLOB_READ_WRITE_TOKEN", VALID_TOKEN);
+    const before = Date.now();
+
+    const response = await POST(
+      generateTokenRequest({
+        pathname: `audio/${NOTE_ID}/0`,
+        clientPayload: validClientPayload(),
+      }),
+    );
+    const after = Date.now();
+
+    const json = await response.json();
+    const decoded = getPayloadFromClientToken(json.clientToken as string);
+
+    // Fenêtre acceptée : [before + 5 min, after + 5 min]. Une valeur proche
+    // de l'heure par défaut du SDK (`now + 3600s`) ferait échouer largement
+    // cette assertion — c'est précisément ce qu'on veut détecter.
+    expect(decoded.validUntil).toBeGreaterThanOrEqual(before + 5 * 60 * 1000);
+    expect(decoded.validUntil).toBeLessThanOrEqual(after + 5 * 60 * 1000);
   });
 
   it("corps JSON malformé → 400 BAD_REQUEST", async () => {
