@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { HEARTBEAT_INTERVAL_MS, STALE_THRESHOLD_MS } from "@/components/activeRecordingMarker";
 import { createMemoryNoteStore } from "@/lib/store/memory";
 import type { NoteStore } from "@/types/notes";
 
@@ -7,11 +8,19 @@ import { DEFAULT_BASE_DELAY_MS } from "./backoff";
 import { ApiRequestError } from "./errors";
 import {
   collectQueueItems,
+  isSegmentClaimAvailable,
   UploadQueue,
   type QueueSegmentContext,
   type TranscribeSegmentFn,
   type UploadSegmentFn,
 } from "./queue";
+
+/** Laisse s'écouler un nombre généreux de tours de micro-tâches, sans dépendre des timers factices. */
+async function flushMicrotasks(turns = 30): Promise<void> {
+  for (let i = 0; i < turns; i += 1) {
+    await Promise.resolve();
+  }
+}
 
 async function firstSegment(store: NoteStore, noteId: string) {
   const segments = await store.listSegments(noteId);
@@ -85,7 +94,7 @@ describe("collectQueueItems", () => {
     });
     await store.updateSegment(done.id, { status: "done" });
 
-    const items = await collectQueueItems(store);
+    const items = await collectQueueItems(store, "tab-test");
     const ids = items.map((i) => i.segmentId).sort();
     expect(ids).toEqual([local.id, uploaded.id].sort());
     const uploadedItem = items.find((i) => i.segmentId === uploaded.id);
@@ -105,7 +114,7 @@ describe("collectQueueItems", () => {
     });
     await store.deleteNote(note.id);
 
-    const items = await collectQueueItems(store);
+    const items = await collectQueueItems(store, "tab-test");
     expect(items).toEqual([]);
   });
 });
@@ -505,5 +514,275 @@ describe("UploadQueue", () => {
     // statut fantôme), mais la file, elle, s'est bien arrêtée pour de bon.
     const seg = await firstSegment(store, note.id);
     expect(seg.status).toBe("uploading");
+  });
+
+  describe("B2 — réservation de segment par onglet", () => {
+    it("deux files sur le même store ne traitent pas le même segment (sonde de la revue)", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      const segment = await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+
+      const transcriptions: string[] = [];
+      let releaseUploadA: (() => void) | undefined;
+      const uploadA: UploadSegmentFn = vi.fn(async (ctx) => {
+        await new Promise<void>((resolve) => {
+          releaseUploadA = resolve;
+        });
+        return `https://blob.example/${ctx.noteId}/${ctx.seq}`;
+      });
+      const transcribeA: TranscribeSegmentFn = vi.fn(async (ctx) => {
+        transcriptions.push(`A:${ctx.segmentId}`);
+        return { text: "texte A", provider: "groq" };
+      });
+
+      const uploadB = immediateUpload();
+      const transcribeB: TranscribeSegmentFn = vi.fn(async (ctx) => {
+        transcriptions.push(`B:${ctx.segmentId}`);
+        return { text: "texte B", provider: "groq" };
+      });
+
+      const queueA = new UploadQueue({
+        store,
+        uploadSegment: uploadA,
+        transcribeSegment: transcribeA,
+        isOnline: () => true,
+        tabId: "tab-a",
+      });
+      const queueB = new UploadQueue({
+        store,
+        uploadSegment: uploadB,
+        transcribeSegment: transcribeB,
+        isOnline: () => true,
+        tabId: "tab-b",
+      });
+
+      const startA = queueA.start();
+      // Laisse A poser sa réservation et entrer dans l'upload (bloqué sur
+      // `releaseUploadA`) avant que B ne sonde le store à son tour — c'est
+      // le scénario réaliste (un onglet déjà au travail, l'autre sondant
+      // plus tard sur son propre minuteur), pas une course de micro-tâches.
+      await flushMicrotasks();
+
+      await queueB.start();
+
+      expect(uploadB).not.toHaveBeenCalled();
+      expect(transcribeB).not.toHaveBeenCalled();
+
+      releaseUploadA?.();
+      await startA;
+
+      // Sonde de la revue : ['A:segId', 'B:segId'] attendu -> une seule entrée.
+      expect(transcriptions).toEqual([`A:${segment.id}`]);
+      const seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("done");
+    });
+
+    it("une réservation périmée est reprise : un onglet mort ne bloque jamais un segment pour de bon", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      const segment = await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+      // Réservation laissée par un onglet mort avant la fin de l'upload,
+      // horodatée très loin dans le passé : périmée quel que soit l'instant
+      // présent du test.
+      await store.updateSegment(segment.id, {
+        status: "uploading",
+        claimedBy: "tab-dead",
+        claimedAt: 0,
+      });
+
+      const uploadSegment = immediateUpload();
+      const transcribeSegment = immediateTranscribe();
+      const queue = new UploadQueue({
+        store,
+        uploadSegment,
+        transcribeSegment,
+        isOnline: () => true,
+        tabId: "tab-alive",
+      });
+      await queue.start();
+
+      expect(uploadSegment).toHaveBeenCalledTimes(1);
+      const seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("done");
+    });
+
+    it("une réservation fraîche d'un autre onglet est ignorée", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      const segment = await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+      await store.updateSegment(segment.id, {
+        status: "uploading",
+        claimedBy: "tab-other",
+        claimedAt: Date.now(),
+      });
+
+      const uploadSegment = immediateUpload();
+      const transcribeSegment = immediateTranscribe();
+      const queue = new UploadQueue({
+        store,
+        uploadSegment,
+        transcribeSegment,
+        isOnline: () => true,
+        tabId: "tab-me",
+      });
+      await queue.start();
+
+      expect(uploadSegment).not.toHaveBeenCalled();
+      const seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("uploading");
+      expect(seg.claimedBy).toBe("tab-other");
+    });
+
+    it("la réservation est libérée après un échec : le segment reste reprenable, même par un autre onglet, sans attendre le backoff du premier", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+
+      const failingUpload: UploadSegmentFn = vi.fn(async () => {
+        throw new TypeError("Failed to fetch");
+      });
+      const queueA = new UploadQueue({
+        store,
+        uploadSegment: failingUpload,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-a",
+      });
+      await queueA.start();
+
+      let seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("error");
+      expect(seg.claimedBy).toBeUndefined();
+      expect(seg.claimedAt).toBeUndefined();
+
+      // tab-b n'a aucune idée du backoff en mémoire de tab-a : la
+      // réservation libérée suffit à lui permettre de reprendre tout de
+      // suite, plutôt que de laisser le segment bloqué en attendant tab-a.
+      const uploadB = immediateUpload();
+      const queueB = new UploadQueue({
+        store,
+        uploadSegment: uploadB,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-b",
+      });
+      await queueB.start();
+
+      expect(uploadB).toHaveBeenCalledTimes(1);
+      seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("done");
+    });
+
+    it("la réservation est rafraîchie pendant un traitement réellement en cours, jamais vue comme périmée par un autre onglet", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+
+      let releaseUpload: (() => void) | undefined;
+      const slowUpload: UploadSegmentFn = vi.fn(async (ctx) => {
+        await new Promise<void>((resolve) => {
+          releaseUpload = resolve;
+        });
+        return `https://blob.example/${ctx.noteId}/${ctx.seq}`;
+      });
+      const queueA = new UploadQueue({
+        store,
+        uploadSegment: slowUpload,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-a",
+      });
+
+      const startA = queueA.start();
+      await flushMicrotasks(); // A a réservé le segment et est bloqué dans l'upload
+
+      // Le traitement dure plus longtemps que le seuil de péremption : sans
+      // rafraîchissement de `claimedAt`, un autre onglet le croirait
+      // abandonné et se remettrait à le traiter en double.
+      expect(HEARTBEAT_INTERVAL_MS).toBeLessThan(STALE_THRESHOLD_MS);
+      await vi.advanceTimersByTimeAsync(STALE_THRESHOLD_MS + 1000);
+
+      const uploadB = immediateUpload();
+      const queueB = new UploadQueue({
+        store,
+        uploadSegment: uploadB,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-b",
+      });
+      await queueB.start();
+
+      expect(uploadB).not.toHaveBeenCalled();
+
+      releaseUpload?.();
+      await startA;
+
+      const seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("done");
+    });
+  });
+});
+
+describe("isSegmentClaimAvailable", () => {
+  const NOW = 1_000_000;
+
+  it("libre si jamais réservé", () => {
+    expect(isSegmentClaimAvailable({ claimedBy: undefined, claimedAt: undefined }, "tab-a", NOW)).toBe(
+      true,
+    );
+  });
+
+  it("toujours disponible pour l'onglet qui détient déjà la réservation", () => {
+    expect(isSegmentClaimAvailable({ claimedBy: "tab-a", claimedAt: NOW - 1 }, "tab-a", NOW)).toBe(true);
+  });
+
+  it("indisponible pour un autre onglet tant que la réservation est fraîche", () => {
+    expect(
+      isSegmentClaimAvailable(
+        { claimedBy: "tab-a", claimedAt: NOW },
+        "tab-b",
+        NOW + STALE_THRESHOLD_MS - 1,
+      ),
+    ).toBe(false);
+  });
+
+  it("redevient disponible pour un autre onglet une fois périmée", () => {
+    expect(
+      isSegmentClaimAvailable(
+        { claimedBy: "tab-a", claimedAt: NOW },
+        "tab-b",
+        NOW + STALE_THRESHOLD_MS + 1,
+      ),
+    ).toBe(true);
   });
 });

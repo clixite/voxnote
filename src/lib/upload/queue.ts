@@ -24,7 +24,33 @@
  * ou `uploading` sans `blobUrl` reprend l'upload depuis le début (écrase le
  * même chemin de blob, sans risque) ; un segment `uploaded`, `transcribing`,
  * ou `error` AVEC `blobUrl` ne reprend qu'à la transcription.
+ *
+ * Réservation par onglet (B2, revue sécurité) : `inFlight` est en mémoire,
+ * donc par onglet — rien n'empêchait deux onglets ouverts sur la même note
+ * de traiter le même segment en parallèle (upload payé deux fois, `allowOverwrite`
+ * faisant réussir silencieusement le doublon plutôt que le rejeter). Les
+ * champs `Segment.claimedBy`/`claimedAt` (contrat `src/types/notes.ts`)
+ * persistent CETTE réservation : posée à l'entrée dans `uploading`/
+ * `transcribing`, rafraîchie pendant tout le traitement effectif
+ * (`withClaimHeartbeat`), relue par `collectQueueItems` qui n'accepte un
+ * segment déjà réservé que si la réservation est la nôtre ou périmée (seuil
+ * partagé avec le marqueur d'enregistrement, `STALE_THRESHOLD_MS` —
+ * jamais redéfini ici), et libérée à la fin, succès comme échec.
+ *
+ * Limite assumée : sans primitive atomique « réserver seulement si libre »
+ * côté `NoteStore` (hors périmètre de ce module — `src/lib/store/**`), il
+ * reste une fenêtre entre la lecture qui juge un segment libre et l'écriture
+ * qui le réserve, où deux onglets pourraient en théorie lire « libre »
+ * quasi simultanément. Cette réservation ferme le cas réaliste (un onglet
+ * déjà au travail, l'autre sondant plus tard) qui cause la perte financière
+ * réelle ; elle n'est pas une preuve d'exclusion mutuelle stricte au sens
+ * distribué. Une garantie totale demanderait un « claim » atomique implémenté
+ * comme une unique transaction IndexedDB au niveau du store.
  */
+import {
+  HEARTBEAT_INTERVAL_MS,
+  STALE_THRESHOLD_MS,
+} from "@/components/activeRecordingMarker";
 import { NoteNotFoundError, SegmentNotFoundError } from "@/lib/store/errors";
 import type { LangSetting, Note, NoteStore, Segment } from "@/types/notes";
 
@@ -82,6 +108,15 @@ export interface UploadQueueOptions {
   isOnline?: () => boolean;
   /** Horloge injectable pour les tests. Défaut : `Date.now`. */
   now?: () => number;
+  /**
+   * Identifiant de CET onglet, pour la réservation de segment (B2). Doit
+   * réutiliser le même identifiant que le marqueur d'enregistrement
+   * (`getTabId()` de `@/components/activeRecordingMarker`, câblé par
+   * `useUploadQueue.ts`) : deux identifiants d'onglet concurrents dans la
+   * même appli seraient absurdes. Défaut ici (tests, usage hors navigateur) :
+   * un identifiant frais par instance.
+   */
+  tabId?: string;
 }
 
 const DEFAULT_CONCURRENCY = 3;
@@ -110,8 +145,34 @@ interface RetryBookkeeping {
 /** Sentinel `nextRetryAt` d'un échec définitif — voir `RetryBookkeeping.nextRetryAt`. */
 const STOPPED = Number.POSITIVE_INFINITY;
 
+/** Repli si aucun `tabId` n'est fourni (tests, usage hors navigateur) : voir `UploadQueueOptions.tabId`. */
+function generateFallbackTabId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
+    return crypto.randomUUID();
+  }
+  return `queue-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+}
+
 function isMissingEntityError(err: unknown): boolean {
   return err instanceof NoteNotFoundError || err instanceof SegmentNotFoundError;
+}
+
+/**
+ * `true` si CE segment peut être traité par `tabId` maintenant : jamais
+ * réservé, réservé par `tabId` lui-même (reprise du même onglet après un
+ * refresh, `claimedBy` vit dans `sessionStorage` — voir
+ * `activeRecordingMarker.ts`), ou réservé mais périmé (onglet mort, ne doit
+ * jamais bloquer un segment pour de bon — l'erreur symétrique, pire :
+ * un segment jamais transcrit vaut moins qu'un segment transcrit deux fois).
+ */
+export function isSegmentClaimAvailable(
+  segment: Pick<Segment, "claimedBy" | "claimedAt">,
+  tabId: string,
+  now: number,
+): boolean {
+  if (!segment.claimedBy) return true;
+  if (segment.claimedBy === tabId) return true;
+  return now - (segment.claimedAt ?? 0) > STALE_THRESHOLD_MS;
 }
 
 function toContext(segment: Segment, note: Note): QueueSegmentContext {
@@ -135,8 +196,17 @@ function toContext(segment: Segment, note: Note): QueueSegmentContext {
  * soit l'étape où l'erreur est survenue — voir le commentaire de tête) et un
  * balayage des notes pour les segments `uploaded`/`transcribing` que
  * `listPendingSegments()` ne couvre pas par contrat.
+ *
+ * `tabId` filtre au passage les segments réservés par un AUTRE onglet et
+ * dont la réservation est encore fraîche (B2, voir `isSegmentClaimAvailable`)
+ * : ils n'apparaissent tout simplement pas dans le résultat, cet onglet-ci
+ * n'a rien à en faire tant que l'autre s'en occupe.
  */
-export async function collectQueueItems(store: NoteStore): Promise<QueueSegmentContext[]> {
+export async function collectQueueItems(
+  store: NoteStore,
+  tabId: string,
+  now: number = Date.now(),
+): Promise<QueueSegmentContext[]> {
   const notes = await store.listNotes();
   const noteById = new Map(notes.map((note) => [note.id, note] as const));
 
@@ -147,8 +217,9 @@ export async function collectQueueItems(store: NoteStore): Promise<QueueSegmentC
   for (const segment of pendingUpload) {
     const note = noteById.get(segment.noteId);
     if (!note) continue; // Note supprimée entre-temps : segment orphelin, ignoré.
-    items.push(toContext(segment, note));
     seen.add(segment.id);
+    if (!isSegmentClaimAvailable(segment, tabId, now)) continue;
+    items.push(toContext(segment, note));
   }
 
   for (const note of notes) {
@@ -156,8 +227,9 @@ export async function collectQueueItems(store: NoteStore): Promise<QueueSegmentC
     for (const segment of segments) {
       if (seen.has(segment.id)) continue;
       if (segment.status === "uploaded" || segment.status === "transcribing") {
-        items.push(toContext(segment, note));
         seen.add(segment.id);
+        if (!isSegmentClaimAvailable(segment, tabId, now)) continue;
+        items.push(toContext(segment, note));
       }
     }
   }
@@ -175,6 +247,7 @@ export class UploadQueue {
   private readonly maxAmbiguousAttempts: number;
   private readonly isOnline: () => boolean;
   private readonly now: () => number;
+  private readonly tabId: string;
 
   private readonly listeners = new Set<UploadQueueListener>();
   private readonly inFlight = new Set<string>();
@@ -199,6 +272,10 @@ export class UploadQueue {
     this.maxAmbiguousAttempts = options.maxAmbiguousAttempts ?? DEFAULT_MAX_AMBIGUOUS_ATTEMPTS;
     this.isOnline = options.isOnline ?? (() => (typeof navigator === "undefined" ? true : navigator.onLine));
     this.now = options.now ?? (() => Date.now());
+    // Défaut de secours seulement : le vrai identifiant partagé avec le
+    // marqueur d'enregistrement est câblé par useUploadQueue.ts (getTabId()
+    // de @/components/activeRecordingMarker) — voir UploadQueueOptions.tabId.
+    this.tabId = options.tabId ?? generateFallbackTabId();
   }
 
   getSnapshot(): QueueSnapshot {
@@ -328,7 +405,7 @@ export class UploadQueue {
       // perte (voir ticket P3-5, « rassurer »).
       let items: QueueSegmentContext[];
       try {
-        items = await collectQueueItems(this.store);
+        items = await collectQueueItems(this.store, this.tabId, this.now());
       } catch {
         // Le NoteStore lui-même est momentanément inaccessible (IndexedDB pas
         // encore prête, panne ponctuelle...) : jamais de rejection non gérée
@@ -418,6 +495,30 @@ export class UploadQueue {
     }
   }
 
+  /**
+   * Pendant tout traitement effectif (upload ou transcription) d'un segment
+   * RÉSERVÉ, rafraîchit `claimedAt` à intervalle régulier — même cadence que
+   * le heartbeat du marqueur d'enregistrement (`HEARTBEAT_INTERVAL_MS`,
+   * choisie sous le pire cas de throttling des onglets d'arrière-plan). Sans
+   * ça, un traitement plus long que `STALE_THRESHOLD_MS` (transcription
+   * lente, upload sur réseau mobile faible) serait vu comme abandonné par un
+   * autre onglet, qui se remettrait alors à le traiter en parallèle —
+   * exactement le double traitement que la réservation existe pour éviter.
+   */
+  private async withClaimHeartbeat<T>(segmentId: string, work: () => Promise<T>): Promise<T> {
+    const timer = setInterval(() => {
+      void this.store.updateSegment(segmentId, { claimedAt: this.now() }).catch(() => {
+        // Best-effort : un raté de heartbeat n'interrompt pas le travail en
+        // cours, seul son résultat final compte pour le statut du segment.
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+    try {
+      return await work();
+    } finally {
+      clearInterval(timer);
+    }
+  }
+
   private async runItem(item: QueueSegmentContext): Promise<void> {
     try {
       let blobUrl = item.blobUrl;
@@ -425,20 +526,35 @@ export class UploadQueue {
         await this.store.updateSegment(item.segmentId, {
           status: "uploading",
           attempts: item.attempts + 1,
+          claimedBy: this.tabId,
+          claimedAt: this.now(),
         });
         this.emit();
-        blobUrl = await this.uploadSegment(item);
+        blobUrl = await this.withClaimHeartbeat(item.segmentId, () => this.uploadSegment(item));
         await this.store.updateSegment(item.segmentId, {
           status: "uploaded",
           blobUrl,
           error: undefined,
+          claimedBy: this.tabId,
+          claimedAt: this.now(),
         });
         this.emit();
       }
+      // Capturé dans une `const` avant la fermeture ci-dessous : après le
+      // bloc précédent, `blobUrl` est bien un `string` (narrowing normal),
+      // mais une fermeture passée à `withClaimHeartbeat` n'hérite pas de
+      // cette certitude — TypeScript la revérifierait sinon à chaque appel.
+      const resolvedBlobUrl: string = blobUrl;
 
-      await this.store.updateSegment(item.segmentId, { status: "transcribing" });
+      await this.store.updateSegment(item.segmentId, {
+        status: "transcribing",
+        claimedBy: this.tabId,
+        claimedAt: this.now(),
+      });
       this.emit();
-      const result = await this.transcribeSegment({ ...item, blobUrl });
+      const result = await this.withClaimHeartbeat(item.segmentId, () =>
+        this.transcribeSegment({ ...item, blobUrl: resolvedBlobUrl }),
+      );
       await this.store.putTranscript({
         noteId: item.noteId,
         seq: item.seq,
@@ -446,7 +562,13 @@ export class UploadQueue {
         provider: result.provider,
         createdAt: this.now(),
       });
-      await this.store.updateSegment(item.segmentId, { status: "done", error: undefined });
+      // Réservation libérée : succès, plus personne n'a besoin d'y revenir.
+      await this.store.updateSegment(item.segmentId, {
+        status: "done",
+        error: undefined,
+        claimedBy: undefined,
+        claimedAt: undefined,
+      });
       this.retryState.delete(item.segmentId);
       await this.syncNote(item.noteId);
     } catch (rawError) {
@@ -518,7 +640,16 @@ export class UploadQueue {
     this.retryState.set(item.segmentId, state);
 
     try {
-      await this.store.updateSegment(item.segmentId, { status: "error", error: message });
+      // Réservation libérée ici aussi (B2) : succès comme échec, personne ne
+      // doit rester marqué "en cours" pour un segment qui ne l'est plus. Le
+      // prochain essai (auto, par CET onglet ou un autre) repart d'une
+      // réservation propre plutôt que d'attendre la péremption.
+      await this.store.updateSegment(item.segmentId, {
+        status: "error",
+        error: message,
+        claimedBy: undefined,
+        claimedAt: undefined,
+      });
     } catch (writeErr) {
       if (isMissingEntityError(writeErr)) {
         // Segment/note réellement disparu (RGPD) : plus rien à retenter.

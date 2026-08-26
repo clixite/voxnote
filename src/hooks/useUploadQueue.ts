@@ -12,10 +12,16 @@
  *   entre la file (pure) et le réseau réel ;
  * - exposer un instantané réactif (`globalStatus`, `pendingCount`) et, si un
  *   `noteId` est fourni, la progression de CETTE note (segments uploadés /
- *   transcrits / en erreur) relue depuis le `NoteStore` à chaque changement.
+ *   transcrits / en erreur) relue depuis le `NoteStore` à chaque changement ;
+ * - fournir à la file l'identifiant de CET onglet (réservation de segment,
+ *   B2) — réutilisé tel quel depuis `activeRecordingMarker.ts`, jamais un
+ *   second identifiant concurrent : deux identifiants d'onglet différents
+ *   dans la même appli rendraient la réservation inefficace pour la
+ *   reprise après refresh (voir `getTabId()`, scope `sessionStorage`).
  */
 import { useEffect, useMemo, useState } from "react";
 
+import { getTabId } from "@/components/activeRecordingMarker";
 import { computeNoteProgress, type NoteProgress } from "@/lib/upload/noteRollup";
 import { transcribeSegmentBlob, uploadSegmentBlob } from "@/lib/upload/transport";
 import {
@@ -50,6 +56,8 @@ export interface UseUploadQueueOptions {
   windowRef?: WindowOnlineLike;
   /** Injectable pour les tests. Défaut : `() => navigator.onLine`. */
   isOnline?: () => boolean;
+  /** Injectable pour les tests. Défaut : `getTabId()` (même identifiant que le marqueur d'enregistrement). */
+  tabId?: string;
 }
 
 export interface UseUploadQueueResult {
@@ -83,6 +91,7 @@ export function useUploadQueue(options: UseUploadQueueOptions = {}): UseUploadQu
         transcribeSegment: options.transcribeSegment ?? transcribeSegmentBlob,
         concurrency: options.concurrency,
         isOnline: options.isOnline,
+        tabId: options.tabId ?? getTabId(),
       }),
   );
 
