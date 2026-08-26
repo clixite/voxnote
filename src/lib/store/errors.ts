@@ -24,3 +24,22 @@ export class SegmentNotFoundError extends Error {
     this.segmentId = segmentId;
   }
 }
+
+/**
+ * Deux segments de la même note ne peuvent pas porter le même `seq` : le
+ * contrat d'API fige le chemin du blob à `audio/{noteId}/{seq}` et la clé de
+ * transcript à `[noteId, seq]`, donc un doublon écraserait silencieusement de
+ * l'audio réellement enregistré. Détecté par un index unique `(noteId, seq)` —
+ * voir `indexeddb.ts` (migration v2) et `memory.ts`.
+ */
+export class DuplicateSegmentSeqError extends Error {
+  readonly noteId: string;
+  readonly seq: number;
+
+  constructor(noteId: string, seq: number) {
+    super(`Un segment porte déjà le seq ${seq} pour la note ${noteId}`);
+    this.name = "DuplicateSegmentSeqError";
+    this.noteId = noteId;
+    this.seq = seq;
+  }
+}

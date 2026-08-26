@@ -7,7 +7,11 @@ import type {
   Transcript,
 } from "@/types/notes";
 
-import { NoteNotFoundError, SegmentNotFoundError } from "./errors";
+import {
+  DuplicateSegmentSeqError,
+  NoteNotFoundError,
+  SegmentNotFoundError,
+} from "./errors";
 import { createInsertionClock } from "./insertion-order";
 import { isPendingUploadStatus } from "./pending";
 
@@ -101,6 +105,11 @@ export function createMemoryNoteStore(): NoteStore {
     async appendSegment(input: AppendSegmentInput): Promise<Segment> {
       if (!notes.has(input.noteId)) {
         throw new NoteNotFoundError(input.noteId);
+      }
+      for (const segment of segments.values()) {
+        if (segment.noteId === input.noteId && segment.seq === input.seq) {
+          throw new DuplicateSegmentSeqError(input.noteId, input.seq);
+        }
       }
       const stored: StoredSegment = {
         id: crypto.randomUUID(),

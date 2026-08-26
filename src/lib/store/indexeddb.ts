@@ -1,4 +1,10 @@
-import { openDB, type DBSchema, type IDBPDatabase } from "idb";
+import {
+  openDB,
+  type DBSchema,
+  type IDBPDatabase,
+  type IDBPTransaction,
+  type StoreNames,
+} from "idb";
 
 import type {
   AppendSegmentInput,
@@ -9,7 +15,11 @@ import type {
   Transcript,
 } from "@/types/notes";
 
-import { NoteNotFoundError, SegmentNotFoundError } from "./errors";
+import {
+  DuplicateSegmentSeqError,
+  NoteNotFoundError,
+  SegmentNotFoundError,
+} from "./errors";
 import { createInsertionClock } from "./insertion-order";
 import { PENDING_SEGMENT_STATUSES } from "./pending";
 
@@ -20,7 +30,7 @@ import { PENDING_SEGMENT_STATUSES } from "./pending";
  * jamais en réécrivant les blocs précédents.
  */
 export const NOTES_DB_NAME = "voxnote";
-export const NOTES_DB_VERSION = 1;
+export const NOTES_DB_VERSION = 2;
 
 /** Segment tel que conservé en base : le contrat public n'expose pas `insertedAt`. */
 interface StoredSegment extends Segment {
@@ -37,7 +47,17 @@ interface VoxNoteDB extends DBSchema {
   segments: {
     key: string;
     value: StoredSegment;
-    indexes: { "by-noteId": string; "by-status": Segment["status"] };
+    indexes: {
+      "by-noteId": string;
+      "by-status": Segment["status"];
+      /**
+       * Unique : empêche deux segments de la même note de partager un `seq`
+       * (deux onglets qui reprennent la même note en parallèle, notamment).
+       * Une violation lève une `ConstraintError` DOM, traduite en
+       * `DuplicateSegmentSeqError` par `appendSegment`.
+       */
+      "by-noteId-seq": [string, number];
+    };
   };
   transcripts: {
     /** Clé composite : un transcript est identifié par sa note et son segment. */
@@ -47,7 +67,12 @@ interface VoxNoteDB extends DBSchema {
   };
 }
 
-function upgrade(db: IDBPDatabase<VoxNoteDB>, oldVersion: number): void {
+function upgrade(
+  db: IDBPDatabase<VoxNoteDB>,
+  oldVersion: number,
+  _newVersion: number | null,
+  transaction: IDBPTransaction<VoxNoteDB, StoreNames<VoxNoteDB>[], "versionchange">,
+): void {
   if (oldVersion < 1) {
     const notes = db.createObjectStore("notes", { keyPath: "id" });
     notes.createIndex("by-createdAt", "createdAt");
@@ -61,6 +86,14 @@ function upgrade(db: IDBPDatabase<VoxNoteDB>, oldVersion: number): void {
     });
     transcripts.createIndex("by-noteId", "noteId");
   }
+
+  if (oldVersion < 2) {
+    // Base déjà en v1 (créée avant ce correctif) ou toute neuve (le bloc
+    // ci-dessus vient de créer le store dans la même transaction) : dans les
+    // deux cas, on le récupère via la transaction plutôt que via `db`.
+    const segments = transaction.objectStore("segments");
+    segments.createIndex("by-noteId-seq", ["noteId", "seq"], { unique: true });
+  }
 }
 
 function toPublicSegment(stored: StoredSegment): Segment {
@@ -71,6 +104,16 @@ function toPublicSegment(stored: StoredSegment): Segment {
 
 function defaultTitle(createdAt: number): string {
   return new Date(createdAt).toISOString();
+}
+
+/** Violation de l'index unique `by-noteId-seq` (ou de tout autre index unique). */
+function isConstraintError(err: unknown): boolean {
+  return (
+    typeof err === "object" &&
+    err !== null &&
+    "name" in err &&
+    (err as { name?: unknown }).name === "ConstraintError"
+  );
 }
 
 export interface IndexedDbNoteStore extends NoteStore {
@@ -193,7 +236,14 @@ export function createIndexedDbNoteStore(
         attempts: 0,
         insertedAt: nextInsertedAt(),
       };
-      await db.add("segments", stored);
+      try {
+        await db.add("segments", stored);
+      } catch (err) {
+        if (isConstraintError(err)) {
+          throw new DuplicateSegmentSeqError(input.noteId, input.seq);
+        }
+        throw err;
+      }
       return toPublicSegment(stored);
     },
 

@@ -8,7 +8,11 @@ import { describe, expect, it } from "vitest";
 import type { NoteStore } from "@/types/notes";
 
 import { createIndexedDbNoteStore } from "./indexeddb";
-import { NoteNotFoundError, SegmentNotFoundError } from "./errors";
+import {
+  DuplicateSegmentSeqError,
+  NoteNotFoundError,
+  SegmentNotFoundError,
+} from "./errors";
 import { createMemoryNoteStore } from "./memory";
 
 import "./test-fake-idb";
@@ -123,6 +127,56 @@ describe.each(implementations)("NoteStore — %s", (_name, createStore) => {
 
     const segments = await store.listSegments(note.id);
     expect(segments.map((s) => s.seq)).toEqual([0, 1, 2]);
+  });
+
+  it("appendSegment refuse un doublon de seq pour la même note", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+
+    const first = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["premier"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await expect(
+      store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["deuxieme"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(DuplicateSegmentSeqError);
+
+    // Le doublon rejeté ne doit pas avoir remplacé ni ajouté quoi que ce soit.
+    const segments = await store.listSegments(note.id);
+    expect(segments.map((s) => s.id)).toEqual([first.id]);
+  });
+
+  it("appendSegment autorise le même seq sur deux notes différentes", async () => {
+    const store = createStore();
+    const noteA = await store.createNote({ lang: "fr" });
+    const noteB = await store.createNote({ lang: "en" });
+
+    await store.appendSegment({
+      noteId: noteA.id,
+      seq: 0,
+      blob: new Blob(["a"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    await expect(
+      store.appendSegment({
+        noteId: noteB.id,
+        seq: 0,
+        blob: new Blob(["b"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      }),
+    ).resolves.toBeDefined();
   });
 
   it("listSegments d'une note inexistante renvoie une liste vide", async () => {

@@ -9,6 +9,7 @@ import { openDB } from "idb";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { createIndexedDbNoteStore, NOTES_DB_VERSION } from "./indexeddb";
+import { DuplicateSegmentSeqError } from "./errors";
 
 import "./test-fake-idb";
 
@@ -45,6 +46,7 @@ describe("createIndexedDbNoteStore", () => {
     const segmentsTx = raw.transaction("segments");
     expect([...segmentsTx.store.indexNames].sort()).toEqual([
       "by-noteId",
+      "by-noteId-seq",
       "by-status",
     ]);
 
@@ -158,6 +160,108 @@ describe("createIndexedDbNoteStore", () => {
     await expect(
       store.updateNote("absente", { status: "done" }),
     ).rejects.toMatchObject({ name: "NoteNotFoundError" });
+
+    await store.close();
+  });
+
+  it("un doublon de seq est rejeté par l'index unique, pas juste par notre code", async () => {
+    const dbName = freshDbName();
+    openStores.push(dbName);
+    const store = createIndexedDbNoteStore({ dbName });
+    const note = await store.createNote({ lang: "fr" });
+
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["premier"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await expect(
+      store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["concurrent"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(DuplicateSegmentSeqError);
+
+    // Vérifié au ras de la base : un seul segment, l'audio original n'a pas
+    // été écrasé par le doublon rejeté.
+    const raw = await openDB(dbName, NOTES_DB_VERSION);
+    const rawSegments = await raw.getAll("segments");
+    expect(rawSegments).toHaveLength(1);
+    expect(rawSegments[0].blob.size).toBe(new Blob(["premier"]).size);
+    raw.close();
+
+    await store.close();
+  });
+
+  it("une base créée en v1 (avant l'index unique) migre vers v2 sans perte, et applique le nouvel index unique", async () => {
+    const dbName = freshDbName();
+    openStores.push(dbName);
+
+    // Reproduit exactement le schéma v1 tel qu'il existait avant B4, pour
+    // vérifier que `upgrade()` migre une vraie base existante — pas seulement
+    // une base neuve qui traverse les deux blocs `if` d'un coup.
+    const legacy = await openDB(dbName, 1, {
+      upgrade(db) {
+        const notes = db.createObjectStore("notes", { keyPath: "id" });
+        notes.createIndex("by-createdAt", "createdAt");
+        const segments = db.createObjectStore("segments", { keyPath: "id" });
+        segments.createIndex("by-noteId", "noteId");
+        segments.createIndex("by-status", "status");
+        const transcripts = db.createObjectStore("transcripts", {
+          keyPath: ["noteId", "seq"],
+        });
+        transcripts.createIndex("by-noteId", "noteId");
+      },
+    });
+
+    const legacyNote = {
+      id: "legacy-note",
+      createdAt: 1,
+      updatedAt: 1,
+      title: "Ancienne note",
+      lang: "fr",
+      durationMs: 60_000,
+      status: "done",
+    };
+    await legacy.add("notes", legacyNote);
+    await legacy.add("segments", {
+      id: "legacy-seg-0",
+      noteId: legacyNote.id,
+      seq: 0,
+      blob: new Blob(["a"]),
+      mimeType: "audio/webm",
+      durationMs: 60_000,
+      status: "done",
+      attempts: 0,
+      insertedAt: 1,
+    });
+    legacy.close();
+
+    const store = createIndexedDbNoteStore({ dbName });
+
+    // Rien n'a été perdu par la migration.
+    const migratedNote = await store.getNote(legacyNote.id);
+    expect(migratedNote?.title).toBe("Ancienne note");
+    const segments = await store.listSegments(legacyNote.id);
+    expect(segments.map((s) => s.id)).toEqual(["legacy-seg-0"]);
+
+    // Le nouvel index unique s'applique bien à une base migrée, pas
+    // seulement à une base créée directement en v2.
+    await expect(
+      store.appendSegment({
+        noteId: legacyNote.id,
+        seq: 0,
+        blob: new Blob(["b"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      }),
+    ).rejects.toBeInstanceOf(DuplicateSegmentSeqError);
 
     await store.close();
   });
