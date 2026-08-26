@@ -39,6 +39,32 @@ export default function ConfidentialitePage() {
         </p>
       </section>
 
+      <section aria-labelledby="session" className="flex flex-col gap-2">
+        <h2 id="session" className="text-lg font-medium">
+          Cookie de session
+        </h2>
+        <p className="text-sm text-slate-300">
+          Après avoir saisi le mot de passe, un cookie nommé{" "}
+          <strong className="font-medium text-slate-100">vox_session</strong>{" "}
+          est déposé sur votre appareil. Il ne contient aucune donnée
+          personnelle : ni email, ni nom, ni identifiant. Il contient
+          seulement une signature qui prouve que le mot de passe a été saisi
+          correctement.
+        </p>
+        <p className="text-sm text-slate-300">
+          Ce cookie dure{" "}
+          <strong className="font-medium text-slate-100">30 jours</strong>.
+          Après ce délai, vous devrez ressaisir le mot de passe. Il est
+          supprimé immédiatement si vous vous déconnectez.
+        </p>
+        <p className="text-sm text-slate-300">
+          Ce cookie est strictement nécessaire au fonctionnement de
+          l&apos;application : sans lui, impossible de rester connecté. Il ne
+          sert pas à la mesure d&apos;audience, à la publicité ou au suivi.
+          Aucune bannière de consentement n&apos;est donc requise.
+        </p>
+      </section>
+
       <section aria-labelledby="donnees" className="flex flex-col gap-2">
         <h2 id="donnees" className="text-lg font-medium">
           Ce qui est enregistré
@@ -94,6 +120,16 @@ export default function ConfidentialitePage() {
           le texte (dans le navigateur). Vider les données de site du
           navigateur supprime également toutes les notes qui y sont
           conservées.
+        </p>
+      </section>
+
+      <section aria-labelledby="suivi" className="flex flex-col gap-2">
+        <h2 id="suivi" className="text-lg font-medium">
+          Aucun suivi supplémentaire
+        </h2>
+        <p className="text-sm text-slate-300">
+          VoxNote n&apos;utilise aucun autre cookie et aucun outil de mesure
+          d&apos;audience ou de suivi.
         </p>
       </section>
 
