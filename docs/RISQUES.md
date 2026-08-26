@@ -63,11 +63,17 @@ que changer le mot de passe déconnecte tout le monde ; revue de sécurité déd
 bloquante (P1B-5). Le périmètre reste volontairement minuscule : pas de comptes, pas
 d'emails, pas d'OAuth — presque aucune surface d'attaque.
 
-Deux limites à assumer plutôt qu'à cacher :
+Trois limites à assumer plutôt qu'à cacher :
 - **Le throttling est best-effort.** Un compteur en mémoire ne survit pas à un cold
   start et ne se partage pas entre instances serverless. Le vrai frein est la lenteur
   de bcrypt, qui ne protège que si le mot de passe est long. **Consigne : une phrase
   de passe de plusieurs mots, pas un mot de huit lettres.**
+- **La table de throttling est plafonnée** (5000 entrées, éviction des plus
+  anciennes). Un adversaire capable de forger la clé d'identification peut donc
+  effacer son propre compteur en saturant la table. Sur Vercel il ne le peut pas,
+  la clé venant d'un en-tête posé par la plateforme ; et l'éviction ne fait que
+  supprimer des compteurs, jamais en créer — un attaquant ne peut donc pas faire
+  bloquer un utilisateur légitime par saturation.
 - **On ne révoque pas individuellement.** Changer le mot de passe le change pour tout
   le monde, et on ne sait pas qui s'est connecté. C'est le prix du « pas de base de
   données ». Le jour où il faut retirer l'accès à une seule personne, il faut de vrais
