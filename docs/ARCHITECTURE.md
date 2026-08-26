@@ -76,6 +76,41 @@ tap "Arrêter"
 L'assemblage est ordonné par le numéro de séquence du segment, pas par l'ordre
 d'arrivée des réponses : les segments peuvent être transcrits en parallèle.
 
+## Segmentation : redémarrer le MediaRecorder, ne pas utiliser `timeslice`
+
+Piège qui n'est pas dans la skill `audio-web` et qui casserait toute la Phase 3
+s'il était découvert tard.
+
+`MediaRecorder.start(timeslice)` émet des morceaux successifs, mais **seul le
+premier porte l'en-tête du conteneur**. Concaténés dans l'ordre, ils forment un
+fichier valide ; pris isolément, les morceaux 2 à N ne sont pas décodables. Or
+notre architecture repose précisément sur des segments indépendants : uploadés
+séparément, transcrits séparément, éventuellement en parallèle. Avec `timeslice`,
+seul le premier segment serait transcriptible et tous les autres reviendraient en
+erreur « fichier illisible » — chez les trois providers.
+
+La v1 découpe donc en **arrêtant et redémarrant le `MediaRecorder`** toutes les
+~5 minutes, sur le même `MediaStream` (la piste micro n'est jamais relâchée, donc
+aucun nouveau prompt de permission). Chaque cycle produit un fichier complet et
+autonome.
+
+```
+getUserMedia ──▶ MediaStream (ouvert du début à la fin de l'enregistrement)
+                      │
+                      ├── MediaRecorder #0 ── start ─ 5 min ─ stop ─▶ segment 0 (fichier complet)
+                      ├── MediaRecorder #1 ── start ─ 5 min ─ stop ─▶ segment 1 (fichier complet)
+                      └── MediaRecorder #2 ── start ─── stop manuel ─▶ segment 2 (fichier complet)
+```
+
+Contrepartie assumée : la bascule laisse un trou de quelques dizaines de
+millisecondes entre deux segments. Sur de la parole, c'est inaudible et sans effet
+sur la transcription. La supprimer imposerait deux enregistreurs chevauchants et
+une déduplication — complexité sans bénéfice pour l'usage visé.
+
+Un `timeslice` court reste utilisé **à l'intérieur** d'un cycle, uniquement pour
+récupérer les données au fil de l'eau et limiter ce qui est perdu si l'onglet meurt
+au milieu d'un segment.
+
 ## Modèle de données (IndexedDB, source de vérité côté client)
 
 ```
