@@ -70,9 +70,33 @@ describe("createSessionToken / verifySessionToken", () => {
     vi.stubEnv("APP_PASSWORD_HASH", HASH_V2);
     await expect(verifySessionToken(token)).resolves.toBe(false);
   });
+
+  it("rejette un token sans claim `exp`", async () => {
+    const secretKey = new TextEncoder().encode(VALID_SECRET);
+    const noExp = await new SignJWT({ pv: "0000000000000000" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuedAt()
+      .sign(secretKey);
+
+    await expect(verifySessionToken(noExp)).resolves.toBe(false);
+  });
+
+  it("rejette un token sans claim `iat` (requis par maxTokenAge)", async () => {
+    const secretKey = new TextEncoder().encode(VALID_SECRET);
+    const noIat = await new SignJWT({ pv: "0000000000000000" })
+      .setProtectedHeader({ alg: "HS256" })
+      .setExpirationTime("30d")
+      .sign(secretKey);
+
+    await expect(verifySessionToken(noIat)).resolves.toBe(false);
+  });
 });
 
 describe("cookies de session", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
   it("buildSessionCookie pose le bon nom, maxAge et attributs de sécurité", () => {
     const cookie = buildSessionCookie("un-token");
     expect(cookie).toMatchObject({
@@ -92,5 +116,17 @@ describe("cookies de session", () => {
       value: "",
       maxAge: 0,
     });
+  });
+
+  it("secure=false hors plateforme Vercel (local, CI, e2e sur 127.0.0.1)", () => {
+    vi.stubEnv("VERCEL", "");
+    expect(buildSessionCookie("un-token").secure).toBe(false);
+    expect(buildClearedSessionCookie().secure).toBe(false);
+  });
+
+  it("secure=true quand VERCEL=1 (déploiement réel, servi en HTTPS)", () => {
+    vi.stubEnv("VERCEL", "1");
+    expect(buildSessionCookie("un-token").secure).toBe(true);
+    expect(buildClearedSessionCookie().secure).toBe(true);
   });
 });

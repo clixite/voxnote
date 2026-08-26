@@ -33,10 +33,42 @@ interface SessionCookie extends SessionCookieOptions {
   value: string;
 }
 
+/**
+ * `Secure` doit être actif partout SAUF là où aucune vraie requête HTTPS
+ * n'existe de toute façon — concrètement, en local (`next dev`/`next start`)
+ * et en CI (les e2e Playwright font tourner un build de production sur
+ * `http://127.0.0.1`).
+ *
+ * `NODE_ENV` ne permet PAS cette distinction : `next build && next start`
+ * positionne `NODE_ENV=production` aussi bien en CI qu'en vrai déploiement.
+ * Conséquence observée : WebKit — contrairement à Chromium, plus tolérant
+ * sur `localhost`/`127.0.0.1` — refuse de stocker un cookie `Secure` reçu en
+ * clair sur `http://127.0.0.1`, ce qui cassait la session sur `webkit-mobile`
+ * (donc Safari iOS, la cible prioritaire) dans les e2e de connexion.
+ *
+ * Signal retenu : `VERCEL`, positionnée par la plateforme Vercel elle-même
+ * (au build ET dans le runtime des fonctions), jamais par le client — donc
+ * infalsifiable par construction. Volontairement PAS dérivée de la requête
+ * (ni `Host`, ni `x-forwarded-proto`) : ça aurait exigé de faire transiter
+ * la `Request` jusqu'ici depuis les routes de login/logout, hors du
+ * périmètre de ce correctif, et surtout ça aurait réintroduit une
+ * dépendance — même ténue — à une valeur qui transite dans la requête.
+ * `VERCEL` n'existe nulle part côté client.
+ *
+ * Contrepartie assumée : un déploiement HTTPS sur une plateforme AUTRE que
+ * Vercel recevrait un cookie sans `Secure` alors qu'il le mériterait. Sans
+ * objet ici — la stack imposée (CLAUDE.md) est Vercel — mais si ce
+ * correctif est un jour porté ailleurs, il faudra revenir à une détection
+ * basée sur la requête réelle.
+ */
+function shouldUseSecureCookies(): boolean {
+  return process.env.VERCEL === "1";
+}
+
 function baseCookieOptions(): SessionCookieOptions {
   return {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    secure: shouldUseSecureCookies(),
     sameSite: "lax",
     path: "/",
     maxAge: MAX_AGE_SECONDS,
@@ -108,6 +140,12 @@ export async function verifySessionToken(
   try {
     const { payload } = await jwtVerify(token, getSecretKey(authSecret), {
       algorithms: [ALG],
+      // Un token sans `exp` (ou sans `iat`, sur lequel `maxTokenAge`
+      // s'appuie) n'est pas exploitable sans déjà posséder `AUTH_SECRET` —
+      // mais autant fermer la classe de bug explicitement plutôt que de
+      // compter implicitement sur le fait qu'on en émet toujours un.
+      requiredClaims: ["exp", "iat"],
+      maxTokenAge: `${MAX_AGE_SECONDS}s`,
     });
     const currentPv = await computePasswordVersion(appPasswordHash);
     return typeof payload.pv === "string" && payload.pv === currentPv;
