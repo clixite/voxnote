@@ -6,6 +6,7 @@ import {
   noSupportedMimeTypeError,
   noteNotFoundError,
   RecorderError,
+  storageFullError,
   toRecorderError,
 } from "./errors";
 
@@ -57,6 +58,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "storage-full",
       "unknown",
     ] as const;
     for (const code of codes) {
@@ -75,6 +77,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "storage-full",
       "unknown",
     ] as const;
     for (const code of codes) {
@@ -98,6 +101,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "storage-full",
       "unknown",
     ] as const;
     for (const code of codes) {
@@ -123,5 +127,14 @@ describe("erreurs dédiées", () => {
     const error = noteNotFoundError();
     expect(error.code).toBe("note-not-found");
     expect(error.message).toMatch(/n'existe plus/);
+  });
+
+  it("storageFullError dit la vérité : le stockage est plein, rien de ce qui est déjà enregistré n'est perdu (BLOQUANT B1)", () => {
+    const error = storageFullError();
+    expect(error.code).toBe("storage-full");
+    expect(error.message).toMatch(/plein/);
+    // Le message ne doit jamais laisser croire à une perte de données déjà
+    // écrites : c'est tout le sens de la garde B1 dans RecorderEngine.
+    expect(error.message).toMatch(/intact|sauvegardé|déjà enregistré/);
   });
 });

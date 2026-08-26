@@ -11,15 +11,23 @@
  * micro reste ouverte : aucun nouveau prompt de permission). Chaque cycle
  * produit un fichier complet et autonome.
  *
- * Un `timeslice` court (`INTERNAL_TIMESLICE_MS`) reste utilisé À L'INTÉRIEUR
- * d'un cycle, uniquement pour récupérer les données au fil de l'eau et limiter
- * la perte si l'onglet meurt en cours de segment — ces morceaux intermédiaires
- * ne sont jamais persistés séparément, ils sont concaténés en un seul Blob à
- * la fermeture du segment.
+ * Pas de `timeslice` du tout, même à l'intérieur d'un cycle : un `stop()`
+ * émet toujours un dernier `dataavailable` avec tout ce qui a été capté
+ * depuis le début du cycle, donc un seul morceau par segment suffit. Un
+ * timeslice interne avait été ajouté en pensant limiter la perte si l'onglet
+ * meurt en cours de segment — c'est faux (les morceaux restent en mémoire
+ * jusqu'à la fin du cycle, comme sans timeslice) et le coût n'est pas nul :
+ * passer un timeslice à `start()` peut changer la structure du conteneur
+ * produit par Safari, exactement le risque que cette section cherche à
+ * écarter (voir docs/ARCHITECTURE.md).
  *
  * Zéro perte : chaque segment fermé est écrit dans le `NoteStore` AVANT toute
- * autre chose (avant même de démarrer le cycle suivant). Un crash ne coûte
- * donc au pire que le segment en cours.
+ * autre chose (avant même de démarrer le cycle suivant), avec quelques essais
+ * en cas d'échec d'écriture (`persistSegment`). Le blob n'est jamais jeté tant
+ * que l'écriture n'a pas réussi : `currentRecorder` et `cycleChunks` ne sont
+ * libérés qu'après ce succès. Si l'écriture reste impossible (stockage
+ * saturé), l'enregistrement s'arrête proprement en état `error`, jamais en
+ * silence — voir `closeCurrentSegment` et `handleFatalError`.
  */
 import {
   NOTE_MAX_DURATION_MS,
@@ -33,12 +41,13 @@ import {
   noSupportedMimeTypeError,
   noteNotFoundError,
   RecorderError,
+  storageFullError,
 } from "./errors";
 import { transition, type RecorderState } from "./machine";
 import { pickSupportedMimeType, type IsTypeSupportedFn } from "./mime-types";
 
-/** Timeslice interne au cycle : ne produit jamais de segment, seulement un filet de sécurité. */
-const INTERNAL_TIMESLICE_MS = 1000;
+/** Tentatives d'écriture d'un segment avant d'abandonner (1 essai + 2 reprises). */
+const PERSIST_MAX_ATTEMPTS = 3;
 
 export type CreateMediaRecorderFn = (
   stream: MediaStream,
@@ -178,13 +187,25 @@ export class RecorderEngine {
     });
   }
 
-  /** Met en pause : ferme (et persiste) le segment en cours, ne perd rien. */
+  /**
+   * Met en pause : ferme (et persiste) le segment en cours, ne perd rien.
+   * L'état ne passe à `paused` qu'après le succès de cette persistance — en
+   * cas d'échec définitif, `closeCurrentSegment` a déjà basculé en `error`
+   * et notifié les abonnés (BLOQUANT B3 de la revue d'architecture).
+   */
   pause(): Promise<void> {
     return this.enqueue(async () => {
-      this.state = transition(this.state, "PAUSE");
+      const nextState = transition(this.state, "PAUSE");
       this.clearCycleTimer();
-      await this.closeCurrentSegment();
-      this.emit();
+      try {
+        await this.closeCurrentSegment();
+        this.state = nextState;
+      } catch (rawError) {
+        this.handleFatalError(rawError);
+        throw this.lastError;
+      } finally {
+        this.emit();
+      }
     });
   }
 
@@ -197,16 +218,27 @@ export class RecorderEngine {
     });
   }
 
-  /** Arrête définitivement : ferme (et persiste) le segment en cours si actif. */
+  /**
+   * Arrête définitivement : ferme (et persiste) le segment en cours si actif.
+   * Même garde qu'à la pause : l'état ne passe à `stopped` qu'après le succès
+   * de cette persistance (BLOQUANT B3).
+   */
   stop(): Promise<void> {
     return this.enqueue(async () => {
       const wasRecording = this.state === "recording";
-      this.state = transition(this.state, "STOP");
+      const nextState = transition(this.state, "STOP");
       this.clearCycleTimer();
-      if (wasRecording) {
-        await this.closeCurrentSegment();
+      try {
+        if (wasRecording) {
+          await this.closeCurrentSegment();
+        }
+        this.state = nextState;
+      } catch (rawError) {
+        this.handleFatalError(rawError);
+        throw this.lastError;
+      } finally {
+        this.emit();
       }
-      this.emit();
     });
   }
 
@@ -232,6 +264,21 @@ export class RecorderEngine {
     }
   }
 
+  /**
+   * Bascule en `error` de façon irréprochable : appelable depuis n'importe
+   * quel état actif (`recording` l'autorise toujours). Centralise la
+   * traduction d'une erreur brute en `RecorderError` française — jamais un
+   * message technique brut affiché à l'utilisateur.
+   */
+  private handleFatalError(rawError: unknown): void {
+    this.clearCycleTimer();
+    this.lastError =
+      rawError instanceof RecorderError
+        ? rawError
+        : new RecorderError("unknown", messageFor("unknown"));
+    this.state = transition(this.state, "ERROR");
+  }
+
   private async beginCycle(): Promise<void> {
     const remaining = this.maxDurationMs - this.accumulatedMs;
     if (remaining <= 0) {
@@ -250,19 +297,19 @@ export class RecorderEngine {
         if (event.data && event.data.size > 0) this.cycleChunks.push(event.data);
       };
       this.currentRecorder = recorder;
-      recorder.start(INTERNAL_TIMESLICE_MS);
+      // Pas de timeslice (voir le commentaire d'en-tête du fichier) : un seul
+      // morceau, émis par `stop()`, couvre tout le cycle.
+      recorder.start();
 
       this.cycleTimer = setTimeout(() => {
         this.enqueue(() => this.onCycleTimerFired()).catch(() => {
-          // Déjà reflété dans l'état/snapshot ; rien de plus à faire ici.
+          // Déjà reflété dans l'état/snapshot par onCycleTimerFired lui-même
+          // (son propre try/finally emet avant de laisser filer l'erreur) :
+          // rien de plus à faire ici.
         });
       }, cycleBudget);
     } catch (rawError) {
-      this.state = transition(this.state, "ERROR");
-      this.lastError =
-        rawError instanceof RecorderError
-          ? rawError
-          : new RecorderError("unknown", messageFor("unknown"));
+      this.handleFatalError(rawError);
       this.emit();
       throw this.lastError;
     }
@@ -274,7 +321,15 @@ export class RecorderEngine {
     // même de toute réentrance résiduelle).
     if (this.state !== "recording") return;
 
-    await this.closeCurrentSegment();
+    try {
+      await this.closeCurrentSegment();
+    } catch (rawError) {
+      this.handleFatalError(rawError);
+      return;
+    } finally {
+      this.emit();
+    }
+
     if (this.cappedThisCycle) {
       await this.finishOnCap();
     } else {
@@ -289,37 +344,70 @@ export class RecorderEngine {
     this.emit();
   }
 
-  /** Ferme le cycle en cours : arrête le MediaRecorder, assemble le Blob, PERSISTE, met à jour les compteurs. */
+  /**
+   * Ferme le cycle en cours : arrête le `MediaRecorder`, assemble le Blob,
+   * PERSISTE (avec plusieurs essais), met à jour les compteurs.
+   *
+   * Ne touche NI `this.state` NI `emit()` en cas d'échec : c'est la
+   * responsabilité de l'appelant (`pause`, `stop`, `onCycleTimerFired`), qui
+   * décide dans quel état retomber. Ce qui est garanti ici, c'est que
+   * `currentRecorder` et `cycleChunks` ne sont libérés qu'APRÈS un
+   * `appendSegment` réussi (BLOQUANT B1 de la revue) : tant que ce n'est pas
+   * le cas, le blob capté reste en mémoire, récupérable pour un nouvel essai,
+   * au lieu d'être jeté silencieusement pendant qu'un compteur continue de
+   * défiler côté UI.
+   */
   private async closeCurrentSegment(): Promise<void> {
     const recorder = this.currentRecorder;
     if (!recorder) return;
 
     const durationMs = Math.max(0, this.now() - this.cycleStartedAt);
+    // Peut lever (MediaRecorder en erreur matérielle) : currentRecorder et
+    // cycleChunks restent intacts, rien n'est perdu ni marqué comme fermé.
     await this.stopRecorderAndFlush(recorder);
 
     const blob = new Blob(this.cycleChunks, { type: this.mimeType });
+    const seq = this.nextSeq;
+
+    // Peut lever `storageFullError()` après plusieurs essais : le blob assemblé
+    // ci-dessus n'est référencé que par cette variable locale et par
+    // `this.cycleChunks`, qui n'est vidé qu'après le `return` ci-dessous.
+    await this.persistSegment(seq, blob, durationMs);
+
     this.currentRecorder = undefined;
     this.cycleChunks = [];
-
-    // Persistance IMMÉDIATE, avant tout autre traitement : c'est le cœur du
-    // critère « zéro perte ». Un crash après cette ligne ne perd rien de ce
-    // segment ; avant cette ligne, il ne perd au pire que ce seul segment.
-    const seq = this.nextSeq;
-    await this.store.appendSegment({
-      noteId: this.noteId,
-      seq,
-      blob,
-      mimeType: this.mimeType!,
-      durationMs,
-    });
-    this.nextSeq += 1;
+    this.nextSeq = seq + 1;
     this.accumulatedMs += durationMs;
-    await this.store.updateNote(this.noteId, { durationMs: this.accumulatedMs });
 
-    // Notifie les abonnés (le hook React, notamment) : sans cet appel, une
-    // rotation « normale » de segment (ni pause, ni arrêt, ni plafond) ne
-    // serait jamais visible en dehors d'une lecture explicite de `getSnapshot()`.
-    this.emit();
+    // Le segment est déjà écrit à ce stade : un échec de mise à jour de la
+    // note (même cause probable : stockage saturé) est un affichage de durée
+    // en retard, pas une perte de données. Ne fait pas échouer tout le cycle
+    // pour ça.
+    await this.store.updateNote(this.noteId, { durationMs: this.accumulatedMs }).catch(() => {});
+  }
+
+  /**
+   * Écrit le segment dans le `NoteStore`, avec quelques essais immédiats
+   * avant d'abandonner (`PERSIST_MAX_ATTEMPTS`). Le détail technique de
+   * l'échec (quota, base bloquée...) n'est jamais exposé : seul un
+   * `storageFullError()` générique et actionnable remonte à l'appelant.
+   */
+  private async persistSegment(seq: number, blob: Blob, durationMs: number): Promise<void> {
+    for (let attempt = 1; attempt <= PERSIST_MAX_ATTEMPTS; attempt += 1) {
+      try {
+        await this.store.appendSegment({
+          noteId: this.noteId,
+          seq,
+          blob,
+          mimeType: this.mimeType!,
+          durationMs,
+        });
+        return;
+      } catch {
+        // Retenté silencieusement jusqu'à épuisement des essais ci-dessous.
+      }
+    }
+    throw storageFullError();
   }
 
   private stopRecorderAndFlush(recorder: MediaRecorder): Promise<void> {

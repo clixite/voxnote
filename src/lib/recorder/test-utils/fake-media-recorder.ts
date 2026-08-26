@@ -1,10 +1,13 @@
 /**
  * Faux `MediaRecorder` réutilisable pour les tests (jsdom ne l'implémente
  * pas). Reproduit le comportement pertinent pour le moteur de segmentation :
- * - `start(timeslice)` émet des morceaux via `ondataavailable` toutes les
- *   `timeslice` ms (ce sont des morceaux INTERNES, jamais persistés seuls) ;
- * - `stop()` émet un morceau final puis déclenche `onstop` de façon
- *   asynchrone (microtâche), comme un vrai `MediaRecorder` ;
+ * - `start(timeslice)` accepte toujours un timeslice optionnel par fidélité à
+ *   l'API réelle, mais `RecorderEngine` ne lui en passe plus aucun (C1 de la
+ *   revue d'architecture — voir docs/ARCHITECTURE.md, section Segmentation) :
+ *   `startCalls` garde une trace de chaque appel pour le vérifier ;
+ * - `stop()` émet un morceau final (tout ce qui a été capté depuis `start()`)
+ *   puis déclenche `onstop` de façon asynchrone (microtâche), comme un vrai
+ *   `MediaRecorder` ; `stopCallCount` compte les appels ;
  * - `isTypeSupported` est piloté explicitement par les tests via
  *   `FakeMediaRecorder.supportedTypes`, jamais deviné.
  *
@@ -39,6 +42,11 @@ export class FakeMediaRecorder {
   /** Si vrai, `stop()` déclenche `onerror` au lieu de `onstop` (test des erreurs). */
   failOnStop = false;
 
+  /** Historique des arguments passés à `start()` — sert à vérifier C1 (jamais de timeslice). */
+  readonly startCalls: Array<number | undefined> = [];
+  /** Nombre d'appels à `stop()` — sert à vérifier C4 (chaque instance arrêtée une fois). */
+  stopCallCount = 0;
+
   private timesliceTimer: ReturnType<typeof setInterval> | undefined;
   private chunkSeq = 0;
 
@@ -49,6 +57,7 @@ export class FakeMediaRecorder {
   }
 
   start(timesliceMs?: number): void {
+    this.startCalls.push(timesliceMs);
     if (this.state !== "inactive") {
       throw new DOMException("Le MediaRecorder est déjà actif.", "InvalidStateError");
     }
@@ -76,6 +85,7 @@ export class FakeMediaRecorder {
   }
 
   stop(): void {
+    this.stopCallCount += 1;
     if (this.state === "inactive") return;
     if (this.timesliceTimer !== undefined) {
       clearInterval(this.timesliceTimer);

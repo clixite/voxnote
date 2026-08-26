@@ -15,6 +15,7 @@ export type RecorderErrorCode =
   | "no-supported-mime-type"
   | "max-duration-reached"
   | "note-not-found"
+  | "storage-full"
   | "unknown";
 
 export class RecorderError extends Error {
@@ -45,6 +46,8 @@ const MESSAGES: Record<RecorderErrorCode, string> = {
     "Durée maximale de 2 heures atteinte : l'enregistrement s'est arrêté automatiquement, mais tout ce qui a été enregistré est sauvegardé. Démarre un nouvel enregistrement pour continuer.",
   "note-not-found":
     "Cette note n'existe plus : impossible de reprendre l'enregistrement. Démarres-en un nouveau.",
+  "storage-full":
+    "Le stockage de cet appareil est plein : l'enregistrement s'est arrêté. Tout ce qui a déjà été enregistré est intact et sauvegardé. Libère de la place sur ton appareil, puis démarre un nouvel enregistrement.",
   unknown:
     "Impossible d'accéder au microphone, pour une raison inconnue. Réessaie ; si ça persiste, redémarre ton navigateur ou utilise un autre appareil.",
 };
@@ -97,4 +100,15 @@ export function maxDurationReachedError(): RecorderError {
 
 export function noteNotFoundError(): RecorderError {
   return new RecorderError("note-not-found", messageFor("note-not-found"));
+}
+
+/**
+ * Échec définitif (après plusieurs essais) de l'écriture d'un segment dans le
+ * `NoteStore` — typiquement un quota de stockage local saturé. Dit la vérité :
+ * l'enregistrement s'arrête, mais rien de ce qui a déjà été écrit n'est perdu
+ * (voir `RecorderEngine.closeCurrentSegment`, qui ne libère jamais le blob en
+ * mémoire avant un `appendSegment` réussi).
+ */
+export function storageFullError(): RecorderError {
+  return new RecorderError("storage-full", messageFor("storage-full"));
 }
