@@ -72,10 +72,10 @@ describe("deriveNoteRollup", () => {
 });
 
 describe("computeNoteProgress", () => {
-  it("compte uploadés (>= uploaded) et transcrits (done) séparément, et liste les erreurs", () => {
+  it("compte uploadés (blobUrl présent) et transcrits (done) séparément, et liste les erreurs", () => {
     const segments = [
-      segment({ id: "a", seq: 0, status: "done" }),
-      segment({ id: "b", seq: 1, status: "uploaded" }),
+      segment({ id: "a", seq: 0, status: "done", blobUrl: "https://blob.example/a" }),
+      segment({ id: "b", seq: 1, status: "uploaded", blobUrl: "https://blob.example/b" }),
       segment({ id: "c", seq: 2, status: "local" }),
       segment({ id: "d", seq: 3, status: "error", error: "Panne réseau." }),
     ];
@@ -84,5 +84,32 @@ describe("computeNoteProgress", () => {
     expect(progress.uploadedCount).toBe(2);
     expect(progress.transcribedCount).toBe(1);
     expect(progress.errorSegments).toEqual([{ segmentId: "d", seq: 3, message: "Panne réseau." }]);
+  });
+
+  it("C6 : un envoi réussi ne recule jamais si sa transcription échoue ensuite", () => {
+    // Upload terminé (blobUrl posé) puis échec de LA TRANSCRIPTION : le
+    // segment passe en "error" mais garde son blobUrl, aucun octet n'est
+    // reperdu — le compte "envoyés" ne doit pas en tenir compte à la baisse.
+    const segments = [
+      segment({
+        id: "a",
+        seq: 0,
+        status: "error",
+        blobUrl: "https://blob.example/a",
+        error: "Échec de la transcription.",
+      }),
+    ];
+    const progress = computeNoteProgress(segments);
+    expect(progress.uploadedCount).toBe(1);
+    expect(progress.transcribedCount).toBe(0);
+    expect(progress.errorSegments).toEqual([
+      { segmentId: "a", seq: 0, message: "Échec de la transcription." },
+    ]);
+  });
+
+  it("un échec d'upload (jamais de blobUrl) ne compte pas comme envoyé", () => {
+    const segments = [segment({ id: "a", seq: 0, status: "error", error: "Panne réseau." })];
+    const progress = computeNoteProgress(segments);
+    expect(progress.uploadedCount).toBe(0);
   });
 });

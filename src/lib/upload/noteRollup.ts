@@ -71,11 +71,22 @@ export interface NoteProgress {
   errorSegments: Array<{ segmentId: string; seq: number; message: string }>;
 }
 
-/** Compte utilisé par l'UI (P3-5) : indépendant du rollup, jamais devinéà partir du texte assemblé. */
+/**
+ * Compte utilisé par l'UI (P3-5) : indépendant du rollup, jamais deviné à
+ * partir du texte assemblé.
+ *
+ * `uploadedCount` compte les segments qui ONT un `blobUrl`, pas une liste de
+ * statuts (C6, revue) : un segment dont l'upload a réussi puis dont la
+ * TRANSCRIPTION échoue passe en `"error"` tout en gardant son `blobUrl` — le
+ * compter par statut le faisait sortir du compte "envoyés", donnant
+ * l'impression qu'un envoi déjà réussi avait reculé (aucun octet perdu,
+ * pourtant l'inverse exact du "rassurer" visé par cette UI). `blobUrl` est
+ * déjà le signal dont `queue.ts` se sert pour décider de sauter l'upload à
+ * la reprise : une seule source de vérité plutôt que deux listes à tenir
+ * synchronisées.
+ */
 export function computeNoteProgress(segments: Segment[]): NoteProgress {
-  const uploadedCount = segments.filter((s) =>
-    ["uploaded", "transcribing", "done"].includes(s.status),
-  ).length;
+  const uploadedCount = segments.filter((s) => Boolean(s.blobUrl)).length;
   const transcribedCount = segments.filter((s) => s.status === "done").length;
   const errorSegments = segments
     .filter((s) => s.status === "error")
