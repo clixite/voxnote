@@ -69,6 +69,20 @@ export interface Segment {
   error?: string;
   /** Nombre de tentatives d'upload déjà effectuées. */
   attempts: number;
+  /**
+   * Onglet qui a réservé ce segment pour l'uploader ou le transcrire, et
+   * quand. Sans cette réservation, deux onglets ouverts sur la même note
+   * traitent le même segment en parallèle : l'audio est uploadé deux fois et
+   * la transcription est facturée deux fois. L'ensemble des segments « en
+   * vol » ne peut pas vivre en mémoire, il est par onglet par construction —
+   * la réservation doit donc être persistée.
+   *
+   * Une réservation périmée (même seuil que le marqueur d'enregistrement) est
+   * reprenable : c'est le cas de l'onglet mort, qui ne doit jamais bloquer
+   * définitivement un segment.
+   */
+  claimedBy?: string;
+  claimedAt?: number;
 }
 
 export interface Transcript {
