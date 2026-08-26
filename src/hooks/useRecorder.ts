@@ -138,7 +138,12 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
     analyserRef.current = null;
     const ctx = audioContextRef.current;
     audioContextRef.current = null;
-    setLevel(0);
+    // Pas de setLevel(0) ici : cette fonction est appelée depuis un effet
+    // (état terminal, voir plus bas), et déclencher un setState synchrone
+    // depuis un effet est ce que `react-hooks/set-state-in-effect` signale à
+    // raison. Le niveau affiché à 0 en fin de vie est dérivé plus bas à
+    // partir de `snapshot.state` à la place — même résultat, sans render en
+    // cascade.
     if (ctx) void ctx.close().catch(() => {});
   }, []);
 
@@ -194,6 +199,14 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
 
   const start = useCallback(
     async (lang: LangSetting, startOptions: StartRecordingOptions = {}) => {
+      // Défensif, avant tout le reste : si un stream ou un AudioContext
+      // précédent traîne encore (ex. un appui sur "Réessayer" juste après une
+      // erreur), on ne les écrase jamais sans les arrêter d'abord — sinon
+      // leur micro reste ouvert indéfiniment, le premier devenant impossible
+      // à arrêter (BLOQUANT B2 de la revue d'architecture).
+      teardownStream();
+      stopVuMeter();
+
       setErrorMessage(undefined);
       setErrorCode(undefined);
       setMimeTypeSupported(true);
@@ -292,6 +305,7 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
       options.createMediaRecorder,
       options.now,
       startVuMeter,
+      stopVuMeter,
       teardownStream,
     ],
   );
@@ -305,10 +319,28 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
   }, []);
 
   const stop = useCallback(async () => {
+    // Le nettoyage (stream, VU-mètre) n'est plus un effet de bord de cet
+    // appel : voir l'effet ci-dessous, qui réagit à l'état terminal quelle
+    // qu'en soit l'origine (BLOQUANT B2). Un stop() manuel y mène comme les
+    // autres, donc reste couvert.
     await engineRef.current?.stop();
-    teardownStream();
-    stopVuMeter();
-  }, [teardownStream, stopVuMeter]);
+  }, []);
+
+  // BLOQUANT B2 (revue d'architecture) : trois chemins sur quatre menaient à
+  // `stopped`/`error` sans jamais relâcher le stream ni le VU-mètre, parce que
+  // teardownStream()/stopVuMeter() n'étaient appelés que dans stop() —
+  // jamais quand le moteur bascule de sa propre initiative (plafond de 2h via
+  // finishOnCap, échec de beginCycle, échec d'écriture B1/B3). En réagissant
+  // à l'état terminal plutôt qu'au clic, les quatre chemins sont couverts par
+  // le même code. teardownStream()/stopVuMeter() sont idempotents : les
+  // rappeler après un stop() manuel (qui a déjà tout relâché en amenant l'état
+  // ici) ne fait rien de plus.
+  useEffect(() => {
+    if (snapshot.state === "stopped" || snapshot.state === "error") {
+      teardownStream();
+      stopVuMeter();
+    }
+  }, [snapshot.state, teardownStream, stopVuMeter]);
 
   useEffect(() => {
     return () => {
@@ -319,6 +351,12 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
     // eslint-disable-next-line react-hooks/exhaustive-deps -- nettoyage au démontage uniquement
   }, []);
 
+  // Dérivé plutôt qu'imposé par un setState dans l'effet de nettoyage
+  // ci-dessus : le niveau affiché retombe à 0 dès que l'état est terminal,
+  // que la boucle d'animation ait déjà eu le temps de tourner une dernière
+  // fois ou non.
+  const isTerminal = snapshot.state === "stopped" || snapshot.state === "error";
+
   return {
     state: snapshot.state,
     noteId,
@@ -327,7 +365,7 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
     errorMessage,
     errorCode,
     mimeTypeSupported,
-    level,
+    level: isTerminal ? 0 : level,
     start,
     pause,
     resume,
