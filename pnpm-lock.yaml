@@ -11,6 +11,9 @@ importers:
       bcryptjs:
         specifier: ^3.0.3
         version: 3.0.3
+      idb:
+        specifier: ^8.0.3
+        version: 8.0.3
       jose:
         specifier: ^6.2.10
         version: 6.2.10
@@ -66,9 +69,6 @@ importers:
       fake-indexeddb:
         specifier: ^6.2.5
         version: 6.2.5
-      idb:
-        specifier: ^8.0.3
-        version: 8.0.3
       jsdom:
         specifier: ^30.0.1
         version: 30.0.1
