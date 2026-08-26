@@ -12,6 +12,7 @@ import {
   clearActiveRecordingMarker,
   HEARTBEAT_INTERVAL_MS,
   readActiveRecordingMarker,
+  STALE_THRESHOLD_MS,
   writeActiveRecordingMarker,
 } from "./activeRecordingMarker";
 import RecorderScreen from "./RecorderScreen";
@@ -507,5 +508,196 @@ describe("RecorderScreen", () => {
     const afterHeartbeat = readActiveRecordingMarker();
     expect(afterHeartbeat?.noteId).toBe(afterStart?.noteId);
     expect(afterHeartbeat!.updatedAt).toBeGreaterThan(afterStart!.updatedAt);
+  });
+
+  it("B2 — ne démarre pas la file d'upload tant qu'un autre onglet vivant détient la note affichée", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeForeignMarker(note.id, 0); // heartbeat qui vient d'avoir lieu : onglet manifestement vivant.
+    const uploadSegment = vi.fn(async () => "https://blob.example/x");
+    const transcribeSegment = vi.fn(async () => ({ text: "bonjour", provider: "groq" as const }));
+
+    render(
+      <RecorderScreen
+        store={store}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+        uploadSegment={uploadSegment}
+        transcribeSegment={transcribeSegment}
+        isOnline={() => true}
+      />,
+    );
+
+    expect(await screen.findByText(/autre onglet/i)).toBeInTheDocument();
+    // Laisse une chance à une éventuelle file mal gardée de démarrer.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(uploadSegment).not.toHaveBeenCalled();
+    expect(screen.queryByTestId("upload-progress")).not.toBeInTheDocument();
+  });
+
+  it("B2 — reprend l'envoi de lui-même une fois l'autre onglet devenu périmé, sans recharger la page", async () => {
+    // Minuteurs simulés dès le départ : le setInterval de re-vérification
+    // n'est créé qu'une fois `recordingElsewhere` posé, et un `setInterval`
+    // créé pendant que les minuteurs sont réels ne serait jamais avancé par
+    // un `vi.useFakeTimers()` activé après coup (il resterait un minuteur
+    // réel, indépendant de l'horloge simulée).
+    vi.useFakeTimers();
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeForeignMarker(note.id, 0);
+    const uploadSegment = vi.fn(async () => "https://blob.example/x");
+    const transcribeSegment = vi.fn(async () => ({ text: "bonjour", provider: "groq" as const }));
+
+    render(
+      <RecorderScreen
+        store={store}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+        uploadSegment={uploadSegment}
+        transcribeSegment={transcribeSegment}
+        isOnline={() => true}
+      />,
+    );
+
+    // La détection au montage n'attend que des microtâches (deux lectures
+    // du store enchaînées), indépendantes des minuteurs simulés : les
+    // rejouer ici laisse à l'effet du composant le temps de les résoudre à
+    // son tour, sans passer par `waitFor` (dont le polling, lui, dépend de
+    // minuteurs — bloqué tant qu'ils sont simulés sans être avancés).
+    await act(async () => {
+      await store.getNote(note.id);
+      await store.listSegments(note.id);
+    });
+    expect(screen.getByText(/autre onglet/i)).toBeInTheDocument();
+
+    // Au-delà du seuil de péremption : le marqueur écrit une seule fois par
+    // writeForeignMarker ne sera jamais rafraîchi (il ne simule qu'un
+    // instantané, pas un onglet qui continue de battre).
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(STALE_THRESHOLD_MS + HEARTBEAT_INTERVAL_MS);
+    });
+
+    expect(screen.queryByText(/autre onglet/i)).not.toBeInTheDocument();
+    expect(uploadSegment).toHaveBeenCalled();
+  });
+
+  it("QA — retrouve une note arrêtée avec des segments encore en attente et réaffiche sa progression au montage", async () => {
+    // Reproduit le signalement QA : après une navigation incidente (prefetch
+    // relancé au retour réseau), recorder.noteId d'une note déjà arrêtée
+    // redevient undefined. Rien à voir avec le marqueur de reprise (déjà
+    // effacé par un arrêt propre) : la note doit être retrouvée uniquement
+    // parce qu'elle a encore des segments en attente d'envoi.
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.updateNote(note.id, { status: "processing" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    // Pas de marqueur actif : arrêt propre, comme après un `stop()` normal.
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    expect(await screen.findByTestId("upload-progress")).toBeInTheDocument();
+    expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/autre onglet/i)).not.toBeInTheDocument();
+  });
+
+  it("C1 — supprime la note affichée après confirmation, serveur d'abord puis local, et la retire de l'écran", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    const calls: string[] = [];
+    const deleteNote = vi.fn(async (noteId: string) => {
+      calls.push("server");
+      await store.deleteNote(noteId);
+      calls.push("local");
+    });
+
+    render(
+      <RecorderScreen
+        store={store}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+        deleteNote={deleteNote}
+      />,
+    );
+
+    const deleteButton = await screen.findByRole("button", { name: /supprimer cette note/i });
+    await act(async () => {
+      deleteButton.click();
+    });
+    expect(screen.getByText(/irréversible/i)).toBeInTheDocument();
+
+    await act(async () => {
+      screen.getByRole("button", { name: /confirmer la suppression/i }).click();
+    });
+
+    expect(calls).toEqual(["server", "local"]);
+    expect(await store.getNote(note.id)).toBeUndefined();
+    expect(screen.queryByRole("button", { name: /supprimer cette note/i })).not.toBeInTheDocument();
+  });
+
+  it("C1 — si le serveur refuse la suppression, la note reste affichée en erreur plutôt que de disparaître", async () => {
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    const deleteNote = vi.fn(async () => {
+      throw new Error("Impossible de supprimer les fichiers audio pour le moment.");
+    });
+
+    render(
+      <RecorderScreen
+        store={store}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+        deleteNote={deleteNote}
+      />,
+    );
+
+    const deleteButton = await screen.findByRole("button", { name: /supprimer cette note/i });
+    await act(async () => {
+      deleteButton.click();
+    });
+    await act(async () => {
+      screen.getByRole("button", { name: /confirmer la suppression/i }).click();
+    });
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent(/impossible de supprimer/i);
+    expect(await store.getNote(note.id)).toBeDefined();
+    // Toujours affichée, pas escamotée : c'est tout le sens du ticket C1.
+    expect(await screen.findByTestId("upload-progress")).toBeInTheDocument();
   });
 });

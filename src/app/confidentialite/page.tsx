@@ -117,9 +117,22 @@ export default function ConfidentialitePage() {
         </h2>
         <p className="text-sm text-slate-300">
           Supprimer une note efface à la fois l&apos;audio (côté serveur) et
-          le texte (dans le navigateur). Vider les données de site du
-          navigateur supprime également toutes les notes qui y sont
-          conservées.
+          le texte (dans le navigateur). Les deux suppressions sont liées :
+          si l&apos;effacement du serveur échoue, la note n&apos;est pas
+          retirée de ton appareil et reste affichée en erreur, pour que tu
+          puisses réessayer plutôt que de la croire supprimée à tort.
+        </p>
+        <p className="text-sm text-slate-300">
+          Aujourd&apos;hui, l&apos;action « Supprimer cette note » se trouve
+          directement sur l&apos;écran d&apos;enregistrement, pour la note qui
+          y est affichée. Une liste de toutes tes notes, avec cette même
+          action pour chacune, arrivera dans une prochaine version.
+        </p>
+        <p className="text-sm text-slate-300">
+          Vider les données de site du navigateur supprime également toutes
+          les notes qui y sont conservées, mais laisse alors leur audio en
+          ligne jusqu&apos;à la purge automatique (voir ci-dessus) : préfère
+          la suppression depuis l&apos;application quand c&apos;est possible.
         </p>
       </section>
 

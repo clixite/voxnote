@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import type { CreateAudioContextFn, GetUserMediaFn } from "@/hooks/useRecorder";
 import { useRecorder } from "@/hooks/useRecorder";
-import { useUploadQueue, type WindowOnlineLike } from "@/hooks/useUploadQueue";
+import type { WindowOnlineLike } from "@/hooks/useUploadQueue";
 import type { DocumentVisibilityLike, WakeLockLike } from "@/hooks/useWakeLock";
 import { useWakeLock } from "@/hooks/useWakeLock";
 import type { CreateMediaRecorderFn } from "@/lib/recorder/engine";
@@ -21,16 +21,17 @@ import {
   readActiveRecordingMarker,
   writeActiveRecordingMarker,
 } from "./activeRecordingMarker";
+import { createDeleteNote, type DeleteNoteFn } from "./deleteNote";
+import DeleteNoteAction from "./DeleteNoteAction";
 import ErrorBanner from "./ErrorBanner";
 import { formatDuration } from "./format";
 import LevelMeter from "./LevelMeter";
-import OfflineQueueBanner from "./OfflineQueueBanner";
 import OtherTabNotice from "./OtherTabNotice";
 import PauseResumeButton from "./PauseResumeButton";
 import RecordButton from "./RecordButton";
 import ResumeNotice, { type ResumeNoticeInfo } from "./ResumeNotice";
 import TimerDisplay from "./TimerDisplay";
-import UploadProgress from "./UploadProgress";
+import UploadQueueSection from "./UploadQueueSection";
 import WakeLockBanner from "./WakeLockBanner";
 
 export interface RecorderScreenProps {
@@ -48,12 +49,14 @@ export interface RecorderScreenProps {
   maxDurationMs?: number;
   wakeLock?: WakeLockLike;
   documentRef?: DocumentVisibilityLike;
-  /** Injectables pour les tests, transmis tels quels à `useUploadQueue`. */
+  /** Injectables pour les tests, transmis tels quels à `useUploadQueue` (via UploadQueueSection). */
   uploadSegment?: UploadSegmentFn;
   transcribeSegment?: TranscribeSegmentFn;
   uploadConcurrency?: number;
   isOnline?: () => boolean;
   windowRef?: WindowOnlineLike;
+  /** Injectable pour les tests ; en production, `createDeleteNote(store)`. */
+  deleteNote?: DeleteNoteFn;
 }
 
 // Pas de sélecteur de langue dans ce ticket (hors périmètre de l'écran
@@ -61,14 +64,19 @@ export interface RecorderScreenProps {
 const DEFAULT_LANG = "auto" as const;
 
 /**
- * Écran d'enregistrement — assemble useRecorder, useWakeLock et le NoteStore
- * IndexedDB déjà livrés. Ne contient aucune logique d'enregistrement propre :
- * uniquement de la présentation, du câblage d'état, et la détection d'une
- * note laissée active par une session précédente (voir activeRecordingMarker.ts).
+ * Écran d'enregistrement — assemble useRecorder, useWakeLock, UploadQueueSection
+ * et le NoteStore IndexedDB déjà livrés. Ne contient aucune logique
+ * d'enregistrement propre : uniquement de la présentation, du câblage
+ * d'état, et la détection d'une note laissée active par une session
+ * précédente (voir activeRecordingMarker.ts).
  */
 export default function RecorderScreen(props: RecorderScreenProps) {
   const [fallbackStore] = useState<NoteStore>(() => props.store ?? createIndexedDbNoteStore());
   const store = props.store ?? fallbackStore;
+  const deleteNoteFn = useMemo(
+    () => props.deleteNote ?? createDeleteNote(store),
+    [props.deleteNote, store],
+  );
 
   const recorder = useRecorder({
     store,
@@ -81,15 +89,6 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     maxDurationMs: props.maxDurationMs,
   });
   const wakeLock = useWakeLock({ wakeLock: props.wakeLock, documentRef: props.documentRef });
-  const uploadQueue = useUploadQueue({
-    store,
-    noteId: recorder.noteId,
-    uploadSegment: props.uploadSegment,
-    transcribeSegment: props.transcribeSegment,
-    concurrency: props.uploadConcurrency,
-    isOnline: props.isOnline,
-    windowRef: props.windowRef,
-  });
 
   const [announcement, setAnnouncement] = useState("");
   const [interruptedNote, setInterruptedNote] = useState<ResumeNoticeInfo | null>(null);
@@ -97,9 +96,21 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     noteId: string;
     createdAt: number;
   } | null>(null);
+  // `undefined` tant que la vérification initiale (marqueur + store) n'a pas
+  // tranché : la file d'upload ne doit monter qu'une fois cette réponse
+  // connue (voir plus bas), jamais avant — sans quoi elle démarrerait sur
+  // TOUS les segments en attente, y compris ceux d'une note qu'un autre
+  // onglet vivant est en train d'enregistrer, avant même d'avoir eu la
+  // chance de le détecter (B2).
+  const [markerCheckDone, setMarkerCheckDone] = useState(false);
+  // Note dont on affiche la progression d'envoi quand cet écran n'est PAS en
+  // train d'enregistrer lui-même (voir le signalement QA : après une
+  // navigation incidente — reconnexion réseau qui relance un prefetch en
+  // attente — `recorder.noteId` d'une note déjà arrêtée redevient
+  // `undefined`, sans que rien d'autre ne le remplace).
+  const [pendingNoteId, setPendingNoteId] = useState<string | undefined>(undefined);
   const previousStateRef = useRef(recorder.state);
   const previousSegmentCountRef = useRef(recorder.segmentCount);
-  const previousUploadStatusRef = useRef(uploadQueue.globalStatus);
 
   // Détection, au montage seulement, d'une note laissée active par une
   // session précédente (refresh, crash, onglet fermé, ou un AUTRE onglet).
@@ -156,12 +167,62 @@ export default function RecorderScreen(props: RecorderScreenProps) {
         durationMs: note.durationMs,
       });
     }
-    void checkForInterruptedNote();
+    void checkForInterruptedNote().finally(() => {
+      if (!cancelled) setMarkerCheckDone(true);
+    });
     return () => {
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps -- volontairement une seule fois au montage : reprise après rechargement, pas un état à revalider en continu
   }, []);
+
+  // Retrouve, au montage, la note à suivre pour la progression d'envoi
+  // quand cet écran ne vient pas de démarrer sa propre session
+  // d'enregistrement (`recorder.noteId` reste `undefined` dans ce cas — voir
+  // plus bas). Signalement QA : sans ceci, une note fraîchement arrêtée dont
+  // les segments continuent d'être envoyés en arrière-plan perd tout
+  // affichage de suivi après un rechargement — y compris un rechargement
+  // provoqué par le navigateur lui-même (reprise de prefetch au retour
+  // réseau), pas seulement un F5 volontaire. Rien n'est perdu côté données
+  // (IndexedDB atteint bien l'état terminé), seul l'affichage disparaissait.
+  useEffect(() => {
+    let cancelled = false;
+    store
+      .listPendingSegments()
+      .then((segments) => {
+        if (cancelled) return;
+        const [oldest] = segments;
+        if (oldest) setPendingNoteId(oldest.noteId);
+      })
+      .catch(() => {
+        // Pas de quoi bloquer l'écran : au pire, aucune progression ne
+        // s'affiche tant qu'un nouveau segment ne réveille pas la file.
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- volontairement une seule fois au montage, comme la détection de reprise ci-dessus
+  }, []);
+
+  // Re-vérifie périodiquement qu'un « autre onglet » signalé l'est toujours :
+  // sans ceci, une fois `recordingElsewhere` posé, ni le bandeau ni la file
+  // d'upload (voir plus bas) ne se rétabliraient jamais sur cette page tant
+  // qu'elle reste ouverte, même longtemps après que l'autre onglet a
+  // terminé ou est mort. Même cadence que le heartbeat, pour rester cohérent
+  // avec le seuil de péremption (voir activeRecordingMarker.ts).
+  useEffect(() => {
+    if (!recordingElsewhere) return;
+    const id = setInterval(() => {
+      const marker = readActiveRecordingMarker();
+      const stillOwnedElsewhere =
+        marker !== undefined &&
+        marker.noteId === recordingElsewhere.noteId &&
+        !isOwnMarker(marker) &&
+        !isMarkerStale(marker);
+      if (!stillOwnedElsewhere) setRecordingElsewhere(null);
+    }, HEARTBEAT_INTERVAL_MS);
+    return () => clearInterval(id);
+  }, [recordingElsewhere]);
 
   // Heartbeat : rafraîchit `updatedAt` pendant toute la durée de la session
   // (recording ET paused — un autre onglet ne doit pas croire cette note
@@ -203,7 +264,7 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       );
       // Bascule explicite "recording" -> "processing" : c'est le seul
       // moment où l'écran d'enregistrement sait que la session est
-      // réellement terminée. La file d'upload (useUploadQueue) prend le
+      // réellement terminée. La file d'upload (UploadQueueSection) prend le
       // relais à partir de là pour dériver "done"/"partial"/"error" au fil
       // des segments — voir le commentaire de tête de lib/upload/noteRollup.ts.
       if (recorder.noteId) {
@@ -216,9 +277,7 @@ export default function RecorderScreen(props: RecorderScreenProps) {
   }, [recorder.state]);
 
   // Nombre de segments sauvegardés : annoncé séparément du minuteur (qui, lui,
-  // ne doit jamais passer par aria-live — voir TimerDisplay). Réveille aussi
-  // la file d'upload : un nouveau segment vient d'être écrit dans le
-  // NoteStore, inutile d'attendre son prochain passage périodique.
+  // ne doit jamais passer par aria-live — voir TimerDisplay).
   useEffect(() => {
     const previous = previousSegmentCountRef.current;
     previousSegmentCountRef.current = recorder.segmentCount;
@@ -227,40 +286,8 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       setAnnouncement(
         `${recorder.segmentCount} segment${plural ? "s" : ""} enregistré${plural ? "s" : ""} et sauvegardé${plural ? "s" : ""}.`,
       );
-      uploadQueue.notifyNewSegments();
     }
-  }, [recorder.segmentCount, uploadQueue]);
-
-  // État global de l'envoi/transcription (ticket P3-5) : annoncé seulement à
-  // ses changements significatifs, jamais à chaque segment envoyé ou
-  // transcrit — même principe que le minuteur, délibérément hors
-  // `aria-live` (voir TimerDisplay et UploadProgress). L'annonce pour lecteur
-  // d'écran EST la synchronisation avec un système externe ici (comme pour
-  // les transitions de `recorder.state` juste au-dessus) : la règle
-  // `set-state-in-effect` ne voit que des appels `setAnnouncement`, sans
-  // pouvoir savoir qu'ils alimentent une région `aria-live` consommée par un
-  // lecteur d'écran, hors de portée du rendu React lui-même.
-  /* eslint-disable react-hooks/set-state-in-effect -- voir le commentaire ci-dessus */
-  useEffect(() => {
-    const previous = previousUploadStatusRef.current;
-    previousUploadStatusRef.current = uploadQueue.globalStatus;
-    if (previous === uploadQueue.globalStatus) return;
-
-    if (uploadQueue.globalStatus === "offline") {
-      setAnnouncement(
-        "Connexion perdue. Rien n'est perdu : l'envoi reprendra automatiquement au retour du réseau.",
-      );
-    } else if (previous === "offline") {
-      setAnnouncement("Connexion retrouvée : l'envoi reprend.");
-    } else if (uploadQueue.globalStatus === "idle" && previous === "syncing") {
-      setAnnouncement("Transcription terminée.");
-    } else if (uploadQueue.globalStatus === "error") {
-      setAnnouncement(
-        "Certains passages n'ont pas pu être envoyés. Vérifie les erreurs affichées ci-dessous.",
-      );
-    }
-  }, [uploadQueue.globalStatus]);
-  /* eslint-enable react-hooks/set-state-in-effect */
+  }, [recorder.segmentCount]);
 
   function handleStart() {
     setInterruptedNote(null);
@@ -300,11 +327,38 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     setInterruptedNote(null);
   }
 
+  function handleNoteDeleted(deletedNoteId: string) {
+    setPendingNoteId((current) => (current === deletedNoteId ? undefined : current));
+    setInterruptedNote((current) => (current?.noteId === deletedNoteId ? null : current));
+    const marker = readActiveRecordingMarker();
+    if (marker?.noteId === deletedNoteId) clearActiveRecordingMarker();
+    setAnnouncement("Note supprimée.");
+  }
+
   const isSessionActive = recorder.state === "recording" || recorder.state === "paused";
   const showWakeLockBanner =
     isSessionActive && (wakeLock.status === "unsupported" || wakeLock.status === "error");
   const showSegmentStatus = recorder.state !== "idle";
   const segmentsPlural = recorder.segmentCount > 1;
+
+  // Note dont la progression d'envoi est affichée : la session active en
+  // cours si elle existe, sinon la dernière note retrouvée avec des
+  // segments en attente (voir l'effet ci-dessus).
+  const trackedNoteId = recorder.noteId ?? pendingNoteId;
+  // B2 : ne monte la file d'upload que lorsque la vérification initiale a
+  // tranché ET qu'aucun autre onglet vivant ne détient la note affichée.
+  // Tant que `recordingElsewhere` est vrai, ce composant reste démonté :
+  // c'est ce qui coupe réellement le traitement (pas seulement son
+  // affichage), voir UploadQueueSection. Effet de bord accepté et documenté
+  // au rapport : cela met aussi en pause l'envoi d'éventuelles AUTRES notes
+  // de cet onglet le temps que la situation se résolve, faute de pouvoir
+  // demander à la file de ne traiter qu'un sous-ensemble de notes depuis ce
+  // seul composant (voir UploadQueueSection, hors périmètre de ce ticket).
+  const showUploadQueue = markerCheckDone && !recordingElsewhere;
+  // Supprimer suppose une note bien identifiée, hors session active (on ne
+  // supprime pas ce qu'on est en train d'enregistrer) et jamais une note
+  // qu'un autre onglet vivant détient encore.
+  const showDeleteAction = Boolean(trackedNoteId) && !isSessionActive && !recordingElsewhere;
 
   return (
     <div className="flex w-full flex-col items-center gap-6 px-6">
@@ -326,10 +380,6 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       <ErrorBanner message={recorder.errorMessage} code={recorder.errorCode} onRetry={handleStart} />
 
       <WakeLockBanner show={showWakeLockBanner} />
-
-      <OfflineQueueBanner
-        show={uploadQueue.globalStatus === "offline" && uploadQueue.pendingCount > 0}
-      />
 
       <RecordButton
         state={recorder.state}
@@ -353,11 +403,23 @@ export default function RecorderScreen(props: RecorderScreenProps) {
         </p>
       )}
 
-      <UploadProgress
-        progress={uploadQueue.noteProgress}
-        globalStatus={uploadQueue.globalStatus}
-        onRetry={uploadQueue.retrySegment}
-      />
+      {showUploadQueue && (
+        <UploadQueueSection
+          store={store}
+          noteId={trackedNoteId}
+          segmentCount={recorder.segmentCount}
+          onAnnounce={setAnnouncement}
+          uploadSegment={props.uploadSegment}
+          transcribeSegment={props.transcribeSegment}
+          concurrency={props.uploadConcurrency}
+          isOnline={props.isOnline}
+          windowRef={props.windowRef}
+        />
+      )}
+
+      {showDeleteAction && trackedNoteId && (
+        <DeleteNoteAction noteId={trackedNoteId} onDelete={deleteNoteFn} onDeleted={handleNoteDeleted} />
+      )}
     </div>
   );
 }
