@@ -16,6 +16,15 @@
 const WINDOW_MS = 5 * 60 * 1000;
 const MAX_ATTEMPTS = 10;
 
+// Plafond du nombre d'IP suivies simultanément. Sans lui, une IP différente
+// (forgée via l'en-tête le moins fiable, voir `ip.ts`) à chaque tentative
+// créerait une entrée jamais purgée puisque non expirée : croissance mémoire
+// non bornée le temps d'une seule fenêtre de 5 minutes. Au-delà, on évince
+// les entrées les plus anciennes plutôt que de refuser les nouvelles — le
+// throttling reste best-effort, mieux vaut perdre un peu de précision que
+// laisser grossir la mémoire du process indéfiniment.
+export const MAX_TRACKED_IPS = 5000;
+
 interface Bucket {
   count: number;
   windowStart: number;
@@ -25,6 +34,30 @@ const buckets = new Map<string, Bucket>();
 
 function isExpired(bucket: Bucket, now: number): boolean {
   return now - bucket.windowStart > WINDOW_MS;
+}
+
+/** Retire du Map toutes les entrées dont la fenêtre est passée. */
+function purgeExpired(now: number): void {
+  for (const [ip, bucket] of buckets) {
+    if (isExpired(bucket, now)) buckets.delete(ip);
+  }
+}
+
+/**
+ * Si le nombre d'IP suivies dépasse la limite, évince les plus anciennes.
+ * Un `Map` JS conserve l'ordre d'insertion : les premières entrées itérées
+ * sont donc les plus anciennes (`recordFailedAttempt` recrée l'entrée,
+ * donc la remet en fin d'ordre, à chaque nouvelle fenêtre pour cette IP).
+ */
+function enforceCapacity(): void {
+  if (buckets.size <= MAX_TRACKED_IPS) return;
+  const excess = buckets.size - MAX_TRACKED_IPS;
+  let removed = 0;
+  for (const ip of buckets.keys()) {
+    if (removed >= excess) break;
+    buckets.delete(ip);
+    removed += 1;
+  }
 }
 
 /** `true` si l'IP a atteint la limite de tentatives échouées sur la fenêtre en cours. */
@@ -41,12 +74,16 @@ export function isThrottled(ip: string): boolean {
 /** Enregistre une tentative échouée pour cette IP. */
 export function recordFailedAttempt(ip: string): void {
   const now = Date.now();
+  purgeExpired(now);
+
   const bucket = buckets.get(ip);
   if (!bucket || isExpired(bucket, now)) {
     buckets.set(ip, { count: 1, windowStart: now });
-    return;
+  } else {
+    bucket.count += 1;
   }
-  bucket.count += 1;
+
+  enforceCapacity();
 }
 
 /** Réinitialise le compteur d'une IP (appelé après une connexion réussie). */
@@ -57,4 +94,9 @@ export function resetAttempts(ip: string): void {
 /** Réservé aux tests : vide l'état global entre les cas de test. */
 export function resetThrottleStateForTests(): void {
   buckets.clear();
+}
+
+/** Réservé aux tests : nombre d'IP actuellement suivies. */
+export function getTrackedIpCountForTests(): number {
+  return buckets.size;
 }

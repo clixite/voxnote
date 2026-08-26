@@ -2,7 +2,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  getTrackedIpCountForTests,
   isThrottled,
+  MAX_TRACKED_IPS,
   recordFailedAttempt,
   resetAttempts,
   resetThrottleStateForTests,
@@ -53,5 +55,24 @@ describe("throttle", () => {
 
     vi.advanceTimersByTime(5 * 60 * 1000 + 1);
     expect(isThrottled(ip)).toBe(false);
+  });
+
+  it("purge les entrées expirées d'AUTRES IP à l'occasion d'un nouvel échec (pas seulement celle consultée)", () => {
+    vi.useFakeTimers();
+    for (let i = 0; i < 50; i += 1) recordFailedAttempt(`10.0.0.${i}`);
+    expect(getTrackedIpCountForTests()).toBe(50);
+
+    vi.advanceTimersByTime(5 * 60 * 1000 + 1);
+    // Un seul nouvel échec, sur une IP différente, doit déclencher le
+    // nettoyage des 50 entrées expirées ci-dessus.
+    recordFailedAttempt("10.0.1.1");
+    expect(getTrackedIpCountForTests()).toBe(1);
+  });
+
+  it("plafonne le nombre d'IP suivies (une IP forgée par tentative ne fait pas grossir la mémoire sans limite)", () => {
+    for (let i = 0; i < MAX_TRACKED_IPS + 200; i += 1) {
+      recordFailedAttempt(`203.0.113.${i}`);
+    }
+    expect(getTrackedIpCountForTests()).toBeLessThanOrEqual(MAX_TRACKED_IPS);
   });
 });
