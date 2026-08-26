@@ -49,15 +49,24 @@ automatique à 7 jours ; suppression d'une note qui efface audio **et** texte ; 
 confidentialité explicite sur l'hébergement. Arbitrage demandé au STOP de Phase 0
 (cf. `docs/PROVIDER-TRANSCRIPTION.md`).
 
-## 5. App publique sans authentification : abus de quota
-**Impact : moyen — pas de fuite de données, mais une facture et un service indisponible.**
-L'URL est publique et il n'y a pas de compte : n'importe qui trouvant l'URL peut
-faire transcrire des heures d'audio sur tes clés.
+## 5. L'authentification devient la seule porte : elle doit tenir
+**Impact : moyen à élevé — une auth maison bâclée est pire qu'une app ouverte, parce qu'elle donne un faux sentiment de sécurité.**
+Depuis l'ajout des comptes (Phase 1bis), tout l'accès repose sur un cookie signé et
+un hash de mot de passe écrits pour ce projet. Les erreurs classiques : secret par
+défaut committé, rôle vérifié uniquement dans l'UI, énumération de comptes, pas de
+throttling sur la connexion, session non révocable.
 
-Parade : rate limiting sur `/api/blob/upload-url` et `/api/transcribe` (P3-1, P3-3,
-durci en P5-3), plafond de 2 h par note appliqué côté client **et** côté serveur,
-plafond de taille par segment. À surveiller après la mise en production : si l'URL
-circule, la réponse v1.1 est un code d'accès partagé unique, pas un système de comptes.
+Parade : `AUTH_SECRET` obligatoire et vérifié au démarrage (aucune valeur par défaut) ;
+rôle vérifié côté serveur à chaque requête, jamais seulement en masquant un bouton ;
+réponse identique que l'email existe ou non ; throttling des tentatives ;
+`token_version` pour révoquer une session sans table à purger ; revue de sécurité
+dédiée et bloquante (P1B-9). Le périmètre reste volontairement étroit : pas de
+réinitialisation par email, pas d'OAuth — moins de surface, moins de failles.
+
+Effet de bord positif : le risque d'abus de quota disparaît en grande partie. Sans
+compte, on ne consomme plus une seconde de transcription. Le rate limiting (P3-1,
+P3-3, P5-3) et le plafond de 2 h par note restent en place comme seconde ceinture,
+au cas où un compte légitime dérape.
 
 ---
 
@@ -67,3 +76,9 @@ circule, la réponse v1.1 est un code d'accès partagé unique, pas un système 
 - **Tarifs des providers** : ordres de grandeur, à revalider avant de figer le défaut.
 - **Dérive de périmètre** : « et si on ajoutait un résumé IA ? » — hors périmètre v1,
   à refuser jusqu'à la livraison de la Phase 6.
+- **Malentendu « j'ai un compte, donc mes notes me suivent »** : faux. Les notes
+  restent sur l'appareil. À écrire noir sur blanc dans l'UI et le README, sous peine
+  d'une mauvaise surprise le jour où l'utilisateur cherche sur son PC une note
+  dictée sur son téléphone. La synchronisation est un chantier v2.
+- **Dépendance de provisioning** : la base Postgres et le store Blob doivent être
+  créés côté Vercel avant que la preview ne soit pleinement fonctionnelle.
