@@ -9,7 +9,7 @@
 │  ┌─────────────┐   segments   ┌──────────────┐   file d'attente          │
 │  │ useRecorder │─────────────▶│  IndexedDB   │◀───────────┐              │
 │  │ MediaRecorder│  (~5 min)   │   (idb)      │            │              │
-│  │ + timeslice │              │ notes,       │            │              │
+│  │ stop/restart│              │ notes,       │            │              │
 │  │ + wakeLock  │              │ segments,    │      ┌─────┴───────┐      │
 │  │ + VU-mètre  │              │ transcripts  │      │ uploadQueue │      │
 │  └─────────────┘              └──────────────┘      │ retry expo. │      │
@@ -60,7 +60,7 @@
 ```
 tap "Enregistrer"
   └─ getUserMedia (geste utilisateur) + wakeLock + AudioContext.resume()
-       └─ MediaRecorder(timeslice) ──▶ segment N ──▶ IndexedDB (statut: local)
+       └─ MediaRecorder #N ─ stop ──▶ segment N ──▶ IndexedDB (statut: local)
                                               └────▶ uploadQueue
                                                        └─ upload-url ─▶ PUT Blob
                                                             └─ statut: uploaded
@@ -107,9 +107,12 @@ millisecondes entre deux segments. Sur de la parole, c'est inaudible et sans eff
 sur la transcription. La supprimer imposerait deux enregistreurs chevauchants et
 une déduplication — complexité sans bénéfice pour l'usage visé.
 
-Un `timeslice` court reste utilisé **à l'intérieur** d'un cycle, uniquement pour
-récupérer les données au fil de l'eau et limiter ce qui est perdu si l'onglet meurt
-au milieu d'un segment.
+Pas de `timeslice` du tout, même à l'intérieur d'un cycle. On avait d'abord cru
+qu'un timeslice court limiterait la perte si l'onglet meurt en cours de segment :
+c'est faux, les morceaux restent en mémoire jusqu'à la fin du cycle et meurent
+avec l'onglet. Le bénéfice est nul, et le coût ne l'est pas — passer un timeslice
+à `start()` peut changer la structure du conteneur produit par Safari, exactement
+le risque que cette section cherche à écarter.
 
 ## Modèle de données (IndexedDB, source de vérité côté client)
 

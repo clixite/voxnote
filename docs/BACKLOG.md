@@ -91,7 +91,7 @@ rétro-adapter des pages publiques. Aucune base de données.
 
 **[P2-2] Hook `useRecorder`** · `dev-frontend` 🔒
 - mimeType choisi par `MediaRecorder.isTypeSupported`, jamais par user-agent ; stocké avec le segment.
-- `timeslice` produisant des segments d'environ 5 min ; chaque segment persisté en IndexedDB **avant** tout upload.
+- Segments d'environ 5 min produits par un cycle **stop/restart du MediaRecorder** (jamais un `timeslice` : seul le premier morceau porte l'en-tête du conteneur, les suivants ne seraient pas décodables seuls) ; chaque segment persisté en IndexedDB **avant** tout upload.
 - Pause / reprise sans perte ni segment corrompu.
 - `getUserMedia` uniquement sur geste utilisateur ; `AudioContext.resume()` géré.
 - Tests vitest sur la machine à états (idle → recording → paused → stopped).

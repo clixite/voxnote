@@ -110,6 +110,12 @@ export interface NoteStore {
   getNote(id: string): Promise<Note | undefined>;
   /** Antéchronologique : la plus récente d'abord. */
   listNotes(): Promise<Note[]>;
+  /**
+   * Fusionne un patch et **met `updatedAt` à l'heure courante**, sauf si le
+   * patch le fixe explicitement. C'est le store qui en est responsable : le
+   * laisser à l'appelant garantit qu'un appelant l'oubliera, et la liste de
+   * notes de la Phase 4 trierait alors sur une date figée à la création.
+   */
   updateNote(id: string, patch: Partial<Omit<Note, "id">>): Promise<Note>;
   /** Supprime la note ET ses segments ET ses transcripts, atomiquement. */
   deleteNote(id: string): Promise<void>;
