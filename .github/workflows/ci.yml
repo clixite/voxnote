@@ -20,6 +20,11 @@ jobs:
       # est `phrase-de-passe-de-test-voxnote`, utilisé par les e2e de connexion.
       AUTH_SECRET: voxnote-public-ci-test-secret-do-not-use-in-prod
       APP_PASSWORD_HASH: "$2b$10$UTeiF0JzNamfFO7B6k4ENeL6CTnKPPOJ4OiZKrjictv.0IDUmt6Yq"
+      # Le serveur tourne en HTTP simple (pas de TLS) sur cette CI : sans ça,
+      # le cookie de session partirait avec `Secure` (comportement par
+      # défaut), que WebKit refuse de stocker hors HTTPS. Ne JAMAIS définir
+      # cette variable en production.
+      ALLOW_INSECURE_COOKIES: "1"
 
     steps:
       - name: Checkout code
@@ -61,6 +66,11 @@ jobs:
       # est `phrase-de-passe-de-test-voxnote`, utilisé par les e2e de connexion.
       AUTH_SECRET: voxnote-public-ci-test-secret-do-not-use-in-prod
       APP_PASSWORD_HASH: "$2b$10$UTeiF0JzNamfFO7B6k4ENeL6CTnKPPOJ4OiZKrjictv.0IDUmt6Yq"
+      # Le serveur tourne en HTTP simple (pas de TLS) sur cette CI : sans ça,
+      # le cookie de session partirait avec `Secure` (comportement par
+      # défaut), que WebKit refuse de stocker hors HTTPS. Ne JAMAIS définir
+      # cette variable en production.
+      ALLOW_INSECURE_COOKIES: "1"
 
     steps:
       - name: Checkout code

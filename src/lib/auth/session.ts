@@ -34,35 +34,39 @@ interface SessionCookie extends SessionCookieOptions {
 }
 
 /**
- * `Secure` doit être actif partout SAUF là où aucune vraie requête HTTPS
- * n'existe de toute façon — concrètement, en local (`next dev`/`next start`)
- * et en CI (les e2e Playwright font tourner un build de production sur
- * `http://127.0.0.1`).
+ * `Secure` doit être actif PAR DÉFAUT, y compris dans tout environnement
+ * inconnu — seule une action délibérée doit pouvoir l'enlever.
  *
- * `NODE_ENV` ne permet PAS cette distinction : `next build && next start`
- * positionne `NODE_ENV=production` aussi bien en CI qu'en vrai déploiement.
- * Conséquence observée : WebKit — contrairement à Chromium, plus tolérant
- * sur `localhost`/`127.0.0.1` — refuse de stocker un cookie `Secure` reçu en
- * clair sur `http://127.0.0.1`, ce qui cassait la session sur `webkit-mobile`
- * (donc Safari iOS, la cible prioritaire) dans les e2e de connexion.
+ * `NODE_ENV` ne permet pas de distinguer "vraie requête HTTPS" de "build de
+ * production tournant en local" : `next build && next start` positionne
+ * `NODE_ENV=production` aussi bien en déploiement réel qu'en CI (e2e
+ * Playwright sur `http://127.0.0.1`). Et WebKit — contrairement à Chromium —
+ * refuse purement et simplement de stocker un cookie `Secure` reçu en clair
+ * sur `http://127.0.0.1` : ça cassait la session sur `webkit-mobile` (donc
+ * Safari iOS, la cible prioritaire) dans les e2e de connexion.
  *
- * Signal retenu : `VERCEL`, positionnée par la plateforme Vercel elle-même
- * (au build ET dans le runtime des fonctions), jamais par le client — donc
- * infalsifiable par construction. Volontairement PAS dérivée de la requête
- * (ni `Host`, ni `x-forwarded-proto`) : ça aurait exigé de faire transiter
- * la `Request` jusqu'ici depuis les routes de login/logout, hors du
- * périmètre de ce correctif, et surtout ça aurait réintroduit une
- * dépendance — même ténue — à une valeur qui transite dans la requête.
- * `VERCEL` n'existe nulle part côté client.
+ * Une première version détectait "je tourne sur Vercel" via `VERCEL === "1"`
+ * pour activer `Secure`. Le sens de défaillance était le mauvais : l'absence
+ * du signal (silencieuse) désactivait `Secure`. Or ce signal peut disparaître
+ * en production sans redéploiement ni changement de code — le réglage projet
+ * Vercel "Automatically expose System Environment Variables" est désactivable,
+ * et `VERCEL` disparaît alors de l'environnement des fonctions. Un cookie de
+ * session serait alors posé sans `Secure` sur la toute première requête
+ * `http://` avant la redirection HTTPS de la plateforme — une fuite invisible
+ * en production, qu'aucun test ne peut voir puisque la CI tourne justement
+ * hors plateforme (elle a exactement le même environnement "sans VERCEL").
  *
- * Contrepartie assumée : un déploiement HTTPS sur une plateforme AUTRE que
- * Vercel recevrait un cookie sans `Secure` alors qu'il le mériterait. Sans
- * objet ici — la stack imposée (CLAUDE.md) est Vercel — mais si ce
- * correctif est un jour porté ailleurs, il faudra revenir à une détection
- * basée sur la requête réelle.
+ * Polarité inversée en conséquence : `Secure` est actif par défaut, et il
+ * faut poser explicitement `ALLOW_INSECURE_COOKIES=1` pour l'enlever. Un
+ * oubli devient alors un échec visible (session qui ne tient pas en local,
+ * détecté par le test ci-dessous et par les e2e) plutôt qu'une fuite
+ * invisible en production. Cette variable ne doit JAMAIS être définie en
+ * production (voir `.env.example` et `docs/ENVIRONNEMENT.md`) : elle n'a de
+ * sens que pour le développement local (`pnpm dev`) et la CI (e2e sur
+ * `http://127.0.0.1`), où aucune vraie requête HTTPS n'existe de toute façon.
  */
 function shouldUseSecureCookies(): boolean {
-  return process.env.VERCEL === "1";
+  return process.env.ALLOW_INSECURE_COOKIES !== "1";
 }
 
 function baseCookieOptions(): SessionCookieOptions {

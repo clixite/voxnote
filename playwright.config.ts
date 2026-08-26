@@ -43,6 +43,12 @@ export default defineConfig({
       APP_PASSWORD_HASH:
         process.env.APP_PASSWORD_HASH ??
         "$2b$10$UTeiF0JzNamfFO7B6k4ENeL6CTnKPPOJ4OiZKrjictv.0IDUmt6Yq",
+      // Le serveur e2e tourne en HTTP simple sur 127.0.0.1 (pas de TLS) :
+      // sans ça, le cookie de session partirait avec l'attribut `Secure`
+      // (comportement par défaut, voir src/lib/auth/session.ts), que WebKit
+      // — contrairement à Chromium — refuse de stocker hors HTTPS. Ne JAMAIS
+      // définir cette variable en production.
+      ALLOW_INSECURE_COOKIES: "1",
     },
   },
 });

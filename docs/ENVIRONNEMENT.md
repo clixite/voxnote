@@ -8,6 +8,7 @@ Tous les secrets sont configurés dans **Vercel** (ou en local dans `.env.local`
 |---|---|---|---|---|
 | **AUTH_SECRET** | Oui | Générez une clé aléatoire (ex. `openssl rand -base64 32`) | Signe les cookies JWT de session pour authentifier l'accès | Échec au démarrage — l'app refuse de démarrer |
 | **APP_PASSWORD_HASH** | Oui | Générez avec `pnpm hash-password` | Hash bcrypt du mot de passe unique d'accès | Échec au démarrage — l'app refuse de démarrer |
+| **ALLOW_INSECURE_COOKIES** | Non | À poser à `1` en développement local (`pnpm dev`) uniquement | Retire l'attribut `Secure` du cookie de session (posé par défaut sinon) | Défaut : `Secure` actif — **ne jamais définir cette variable en production** |
 | **TRANSCRIBE_PROVIDER** | Non | Valeurs autorisées : `groq` (défaut), `openai`, `gladia` | Choisit le fournisseur de transcription (IA) | Défaut à `groq` |
 | **GROQ_API_KEY** | Si `TRANSCRIBE_PROVIDER=groq` | Console [Groq](https://console.groq.com) → API Keys | Clé API pour transcription Groq | Erreur lors d'une transcription avec Groq |
 | **OPENAI_API_KEY** | Si `TRANSCRIBE_PROVIDER=openai` | Dashboard [OpenAI](https://platform.openai.com/api-keys) | Clé API pour transcription OpenAI Whisper | Erreur lors d'une transcription avec OpenAI |
@@ -49,6 +50,7 @@ secrets, elles n'ont aucune valeur en production :
 | Mot de passe en clair | `phrase-de-passe-de-test-voxnote` | Utilisé par les e2e de connexion |
 | `APP_PASSWORD_HASH` | hash bcrypt réel de la phrase ci-dessus | Généré avec `pnpm hash-password` |
 | `AUTH_SECRET` | `voxnote-public-ci-test-secret-do-not-use-in-prod` | 48 caractères, manifestement factice |
+| `ALLOW_INSECURE_COOKIES` | `1` | Le serveur e2e tourne en HTTP simple sur `127.0.0.1` ; sans ça, WebKit refuse de stocker le cookie `Secure` posé par défaut (voir section suivante) |
 
 Ces valeurs ne doivent jamais être réutilisées pour un déploiement réel.
 
@@ -103,6 +105,22 @@ cp .env.example .env.local
 ```
 
 Puis remplissez les valeurs réelles. L'app chargera d'abord `.env.local`, ensuite les variables d'environnement du système.
+
+### Cookie de session en HTTP simple (`pnpm dev`)
+
+Le cookie de session porte l'attribut `Secure` **par défaut**, y compris en développement
+local. `pnpm dev` sert l'application en HTTP simple (`http://localhost:3000`) : un cookie
+`Secure` reçu hors HTTPS n'est fiable dans aucun navigateur, et certains (Safari/WebKit)
+refusent purement et simplement de le stocker — la session ne tiendrait pas.
+
+Pour tester en local, ajoutez dans `.env.local` :
+
+```
+ALLOW_INSECURE_COOKIES=1
+```
+
+**Ne définissez JAMAIS cette variable en production** : elle désactive une protection du
+cookie de session (voir `src/lib/auth/session.ts` pour le raisonnement complet).
 
 ## Sécurité
 

@@ -118,15 +118,29 @@ describe("cookies de session", () => {
     });
   });
 
-  it("secure=false hors plateforme Vercel (local, CI, e2e sur 127.0.0.1)", () => {
+  it("secure=true par défaut, y compris dans un environnement inconnu (verrou anti-régression de polarité : un oubli ne doit JAMAIS désactiver Secure silencieusement)", () => {
+    vi.stubEnv("ALLOW_INSECURE_COOKIES", "");
+    expect(buildSessionCookie("un-token").secure).toBe(true);
+    expect(buildClearedSessionCookie().secure).toBe(true);
+  });
+
+  it("secure=true même sans VERCEL dans l'environnement (l'ancien signal ne doit plus jouer de rôle)", () => {
     vi.stubEnv("VERCEL", "");
+    vi.stubEnv("ALLOW_INSECURE_COOKIES", "");
+    expect(buildSessionCookie("un-token").secure).toBe(true);
+  });
+
+  it("secure=false uniquement si ALLOW_INSECURE_COOKIES=1 est posé explicitement (dev local, CI/e2e sur 127.0.0.1)", () => {
+    vi.stubEnv("ALLOW_INSECURE_COOKIES", "1");
     expect(buildSessionCookie("un-token").secure).toBe(false);
     expect(buildClearedSessionCookie().secure).toBe(false);
   });
 
-  it("secure=true quand VERCEL=1 (déploiement réel, servi en HTTPS)", () => {
-    vi.stubEnv("VERCEL", "1");
+  it("toute valeur autre qu'exactement \"1\" est ignorée : secure reste true", () => {
+    vi.stubEnv("ALLOW_INSECURE_COOKIES", "true");
     expect(buildSessionCookie("un-token").secure).toBe(true);
-    expect(buildClearedSessionCookie().secure).toBe(true);
+
+    vi.stubEnv("ALLOW_INSECURE_COOKIES", "0");
+    expect(buildSessionCookie("un-token").secure).toBe(true);
   });
 });
