@@ -86,6 +86,8 @@ export interface UploadQueueOptions {
 
 const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MAX_AMBIGUOUS_ATTEMPTS = 5;
+/** Nouvel essai après une lecture du `NoteStore` elle-même en échec (voir `runTick`). */
+const STORE_RETRY_DELAY_MS = 3000;
 
 interface RetryBookkeeping {
   /** Échecs consécutifs depuis le dernier succès ou la dernière remise à zéro manuelle. */
@@ -324,7 +326,20 @@ export class UploadQueue {
       // utilisateur qui rouvre l'app sans réseau doit voir que ses segments
       // sont toujours là, pas un compteur à zéro qui laisserait croire à une
       // perte (voir ticket P3-5, « rassurer »).
-      const items = await collectQueueItems(this.store);
+      let items: QueueSegmentContext[];
+      try {
+        items = await collectQueueItems(this.store);
+      } catch {
+        // Le NoteStore lui-même est momentanément inaccessible (IndexedDB pas
+        // encore prête, panne ponctuelle...) : jamais de rejection non gérée
+        // qui casserait la file pour de bon, un nouvel essai plus tard suffit.
+        this.wakeTimer = setTimeout(() => {
+          this.wakeTimer = undefined;
+          void this.tick();
+        }, STORE_RETRY_DELAY_MS);
+        this.emit();
+        return;
+      }
       this.pendingCountCache = items.length;
       // Segments définitivement arrêtés (échec non-retryable, ou "ambiguous"
       // ayant épuisé son plafond) parmi ceux en attente : ni en cours, ni
