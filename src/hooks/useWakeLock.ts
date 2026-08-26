@@ -67,9 +67,24 @@ export function useWakeLock(options: UseWakeLockOptions = {}): UseWakeLockResult
 
   const [status, setStatus] = useState<WakeLockStatus>(supported ? "idle" : "unsupported");
   const sentinelRef = useRef<WakeLockSentinelLike | null>(null);
+  // Référence à l'écouteur "release" actuellement attaché à `sentinelRef.current`,
+  // pour pouvoir le retirer avant de changer de sentinelle (C9 de la revue :
+  // sans ça, chaque re-demande accumule un écouteur orphelin sur l'ancienne
+  // sentinelle, jamais retiré).
+  const releaseListenerRef = useRef<(() => void) | null>(null);
   // true tant que l'appelant veut le verrou actif : c'est ce qui déclenche la
   // re-demande au retour au premier plan (l'OS l'a relâché, pas nous).
   const wantActiveRef = useRef(false);
+
+  /** Détache l'écouteur "release" de la sentinelle actuelle, sans la relâcher. */
+  const detachCurrentSentinel = useCallback((): void => {
+    const sentinel = sentinelRef.current;
+    const listener = releaseListenerRef.current;
+    if (sentinel && listener) {
+      sentinel.removeEventListener("release", listener);
+    }
+    releaseListenerRef.current = null;
+  }, []);
 
   const request = useCallback(async (): Promise<void> => {
     wantActiveRef.current = true;
@@ -79,25 +94,49 @@ export function useWakeLock(options: UseWakeLockOptions = {}): UseWakeLockResult
     }
     try {
       const sentinel = await wakeLockApi.request("screen");
+
+      // Une sentinelle précédente (typiquement déjà relâchée par l'OS — c'est
+      // précisément pourquoi on re-demande) ne doit jamais s'accumuler : on
+      // détache son écouteur et on la relâche si besoin avant d'adopter la
+      // nouvelle (C9).
+      const stale = sentinelRef.current;
+      if (stale && stale !== sentinel) {
+        detachCurrentSentinel();
+        if (!stale.released) {
+          stale.release().catch(() => {
+            // Best-effort : la sentinelle est de toute façon abandonnée.
+          });
+        }
+      }
+
       sentinelRef.current = sentinel;
       setStatus("active");
-      sentinel.addEventListener("release", () => {
+      const handleRelease = (): void => {
         setStatus((current) => (current === "active" ? "released" : current));
-      });
+      };
+      releaseListenerRef.current = handleRelease;
+      sentinel.addEventListener("release", handleRelease);
     } catch {
       setStatus("error");
     }
-  }, [wakeLockApi]);
+  }, [wakeLockApi, detachCurrentSentinel]);
 
   const release = useCallback(async (): Promise<void> => {
     wantActiveRef.current = false;
     const sentinel = sentinelRef.current;
+    detachCurrentSentinel();
     sentinelRef.current = null;
     if (sentinel && !sentinel.released) {
-      await sentinel.release();
+      try {
+        await sentinel.release();
+      } catch {
+        // Best-effort (C9) : le rejet de sentinel.release() ne doit jamais
+        // remonter à l'appelant — le statut retombe à idle/unsupported dans
+        // tous les cas, ci-dessous.
+      }
     }
     setStatus(supported ? "idle" : "unsupported");
-  }, [supported]);
+  }, [supported, detachCurrentSentinel]);
 
   useEffect(() => {
     if (!doc || !wakeLockApi) return;
@@ -112,9 +151,15 @@ export function useWakeLock(options: UseWakeLockOptions = {}): UseWakeLockResult
 
   useEffect(() => {
     return () => {
+      detachCurrentSentinel();
       const sentinel = sentinelRef.current;
-      if (sentinel && !sentinel.released) void sentinel.release();
+      if (sentinel && !sentinel.released) {
+        sentinel.release().catch(() => {
+          // Démontage : plus personne n'observe le résultat.
+        });
+      }
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nettoyage au démontage uniquement
   }, []);
 
   return { supported, status, request, release };

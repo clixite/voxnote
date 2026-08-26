@@ -3,12 +3,19 @@ import { describe, expect, it, vi } from "vitest";
 
 import { useWakeLock, type DocumentVisibilityLike, type WakeLockSentinelLike } from "./useWakeLock";
 
-function createFakeSentinel(): WakeLockSentinelLike & { emitRelease: () => void } {
+function createFakeSentinel(): WakeLockSentinelLike & {
+  emitRelease: () => void;
+  /** Nombre d'écouteurs "release" actuellement attachés (C9 : ne doit pas s'accumuler). */
+  readonly listenerCount: number;
+} {
   let released = false;
   const listeners = new Set<() => void>();
   return {
     get released() {
       return released;
+    },
+    get listenerCount() {
+      return listeners.size;
     },
     async release() {
       released = true;
@@ -133,5 +140,93 @@ describe("useWakeLock", () => {
       doc.setVisible(true);
     });
     expect(wakeLock.request).not.toHaveBeenCalled();
+  });
+
+  describe("C9 (revue d'architecture) : pas d'accumulation de sentinelles ni d'écouteurs", () => {
+    it("détache l'écouteur 'release' de l'ancienne sentinelle à chaque re-demande, sur plusieurs cycles", async () => {
+      const sentinels = [createFakeSentinel(), createFakeSentinel(), createFakeSentinel()];
+      let call = 0;
+      const wakeLock = { request: vi.fn(async () => sentinels[call++]!) };
+      const doc = createFakeDocument();
+      const { result } = renderHook(() => useWakeLock({ wakeLock, documentRef: doc }));
+
+      await act(async () => {
+        await result.current.request();
+      });
+      expect(sentinels[0]!.listenerCount).toBe(1);
+
+      await act(async () => {
+        sentinels[0]!.emitRelease();
+      });
+      await act(async () => {
+        doc.setVisible(true); // re-demande → adopte sentinels[1]
+      });
+      // Avant C9 : l'écouteur de sentinels[0] restait attaché pour toujours.
+      expect(sentinels[0]!.listenerCount).toBe(0);
+      expect(sentinels[1]!.listenerCount).toBe(1);
+
+      await act(async () => {
+        sentinels[1]!.emitRelease();
+      });
+      await act(async () => {
+        doc.setVisible(false);
+      });
+      await act(async () => {
+        doc.setVisible(true); // re-demande → adopte sentinels[2]
+      });
+      expect(sentinels[1]!.listenerCount).toBe(0);
+      expect(sentinels[2]!.listenerCount).toBe(1);
+
+      // Preuve directe qu'il n'y a plus d'écouteur fantôme sur les
+      // sentinelles périmées : les redéclencher ne change plus rien.
+      const statusBefore = result.current.status;
+      await act(async () => {
+        sentinels[0]!.emitRelease();
+        sentinels[1]!.emitRelease();
+      });
+      expect(result.current.status).toBe(statusBefore);
+    });
+
+    it("relâche l'ancienne sentinelle (si elle ne l'était pas déjà) au moment d'en adopter une nouvelle", async () => {
+      const stale = createFakeSentinel();
+      const fresh = createFakeSentinel();
+      let call = 0;
+      const wakeLock = {
+        request: vi.fn(async () => (call++ === 0 ? stale : fresh)),
+      };
+      const doc = createFakeDocument();
+      const { result } = renderHook(() => useWakeLock({ wakeLock, documentRef: doc }));
+
+      await act(async () => {
+        await result.current.request();
+      });
+      expect(stale.released).toBe(false);
+
+      // Retour au premier plan SANS que l'OS n'ait relâché `stale` au
+      // préalable (scénario limite : la sentinelle est encore là, mais on
+      // en redemande une, par ex. après un appel explicite à request()) :
+      // avant C9, `stale` restait vivante, jamais relâchée, écouteur compris.
+      await act(async () => {
+        await result.current.request();
+      });
+      expect(stale.released).toBe(true);
+      expect(stale.listenerCount).toBe(0);
+    });
+
+    it("release() ne laisse jamais fuiter le rejet de sentinel.release() sous-jacent", async () => {
+      const sentinel = createFakeSentinel();
+      vi.spyOn(sentinel, "release").mockRejectedValue(new Error("échec natif simulé"));
+      const wakeLock = { request: vi.fn(async () => sentinel) };
+      const { result } = renderHook(() => useWakeLock({ wakeLock }));
+
+      await act(async () => {
+        await result.current.request();
+      });
+
+      await act(async () => {
+        await expect(result.current.release()).resolves.toBeUndefined();
+      });
+      expect(result.current.status).toBe("idle");
+    });
   });
 });
