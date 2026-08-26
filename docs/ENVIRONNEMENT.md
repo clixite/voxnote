@@ -1,6 +1,6 @@
 # Variables d'environnement — VoxNote
 
-Tous les secrets sont configurés dans **Vercel** (ou en local dans `.env.local` si vous testez en développement). Aucun secret n'est commité, ni par défaut en code.
+Tous les secrets sont configurés dans **Vercel** (ou en local dans `.env.local` si tu testes en développement). Aucun secret n'est commité, ni par défaut en code.
 
 ## Tableau des variables
 
@@ -20,7 +20,7 @@ Tous les secrets sont configurés dans **Vercel** (ou en local dans `.env.local`
 
 ### Génération du hash au démarrage
 
-1. Choisissez votre **phrase de passe** (ex. `Mon enregistrement vocal privé 2025`)
+1. Choisis ta **phrase de passe** (ex. `Mon enregistrement vocal privé 2025`)
 2. Générez le hash localement avec :
    ```bash
    pnpm hash-password
@@ -90,7 +90,7 @@ GLADIA_API_KEY=xxxxxxxxxxxx
 
 ## Déploiement sur Vercel
 
-Toutes les variables **SAUF** `TRANSCRIBE_PROVIDER` doivent être définis comme **Secrets** (pas Production-only, à moins que vous ne vouliez pas tester en staging).
+Toutes les variables **SAUF** `TRANSCRIBE_PROVIDER` doivent être définis comme **Secrets** (pas Production-only, à moins que tu ne veuilles pas tester en staging).
 
 1. Vercel Dashboard → Projet → Settings → Environment Variables
 2. Ajoutez chaque variable

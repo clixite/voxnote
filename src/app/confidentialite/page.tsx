@@ -3,7 +3,7 @@ import type { Metadata } from "next";
 
 export const metadata: Metadata = {
   title: "Confidentialité — VoxNote",
-  description: "Ce que VoxNote collecte, où vont vos données et comment les supprimer.",
+  description: "Ce que VoxNote collecte, où vont tes données et comment les supprimer.",
 };
 
 export default function ConfidentialitePage() {
@@ -46,7 +46,7 @@ export default function ConfidentialitePage() {
         <p className="text-sm text-slate-300">
           Après avoir saisi le mot de passe, un cookie nommé{" "}
           <strong className="font-medium text-slate-100">vox_session</strong>{" "}
-          est déposé sur votre appareil. Il ne contient aucune donnée
+          est déposé sur ton appareil. Il ne contient aucune donnée
           personnelle : ni email, ni nom, ni identifiant. Il contient
           seulement une signature qui prouve que le mot de passe a été saisi
           correctement.
@@ -54,8 +54,8 @@ export default function ConfidentialitePage() {
         <p className="text-sm text-slate-300">
           Ce cookie dure{" "}
           <strong className="font-medium text-slate-100">30 jours</strong>.
-          Après ce délai, vous devrez ressaisir le mot de passe. Il est
-          supprimé immédiatement si vous vous déconnectez.
+          Après ce délai, tu devras ressaisir le mot de passe. Il est
+          supprimé immédiatement si tu te déconnectes.
         </p>
         <p className="text-sm text-slate-300">
           Ce cookie est strictement nécessaire au fonctionnement de
@@ -70,7 +70,7 @@ export default function ConfidentialitePage() {
           Ce qui est enregistré
         </h2>
         <ul className="list-disc space-y-1 pl-5 text-sm text-slate-300">
-          <li>L&apos;audio de vos mémos vocaux, le temps de la transcription.</li>
+          <li>L&apos;audio de tes mémos vocaux, le temps de la transcription.</li>
           <li>
             Le texte transcrit, qui reste stocké dans le navigateur de
             l&apos;appareil utilisé pour l&apos;enregistrement (aucune
@@ -107,7 +107,7 @@ export default function ConfidentialitePage() {
           bout de <strong className="font-medium text-slate-100">7 jours</strong>,
           par une purge quotidienne. Le texte transcrit n&apos;a pas de durée
           de conservation imposée : il reste sur l&apos;appareil tant que
-          vous ne le supprimez pas vous-même.
+          tu ne le supprimes pas toi-même.
         </p>
       </section>
 
