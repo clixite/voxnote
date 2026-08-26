@@ -14,12 +14,11 @@ describe("HomePage", () => {
   });
 
 
-  it("affiche le bouton Enregistrer désactivé avec la mention bientôt disponible", () => {
+  it("affiche le bouton Enregistrer prêt à démarrer un enregistrement", () => {
     render(<HomePage />);
 
     const button = screen.getByRole("button", { name: /enregistrer/i });
-    expect(button).toBeDisabled();
-    expect(screen.getByText(/bientôt disponible/i)).toBeInTheDocument();
+    expect(button).not.toBeDisabled();
   });
 
   it("affiche le titre VoxNote et un lien vers la page confidentialité", () => {
