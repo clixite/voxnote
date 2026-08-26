@@ -74,6 +74,27 @@ describe.each(implementations)("NoteStore — %s", (_name, createStore) => {
     expect(updated.lang).toBe("fr");
   });
 
+  it("updateNote met à jour updatedAt à l'heure courante par défaut", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.updateNote(note.id, { createdAt: 1000 }); // isole du createdAt
+
+    const before = Date.now();
+    const updated = await store.updateNote(note.id, { status: "done" });
+    const after = Date.now();
+
+    expect(updated.updatedAt).toBeGreaterThanOrEqual(before);
+    expect(updated.updatedAt).toBeLessThanOrEqual(after);
+  });
+
+  it("updateNote respecte un updatedAt fixé explicitement par le patch", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+
+    const updated = await store.updateNote(note.id, { updatedAt: 42 });
+    expect(updated.updatedAt).toBe(42);
+  });
+
   it("updateNote sur une note inexistante lève NoteNotFoundError", async () => {
     const store = createStore();
     await expect(

@@ -82,7 +82,12 @@ export function createMemoryNoteStore(): NoteStore {
       if (!existing) {
         throw new NoteNotFoundError(id);
       }
-      const updated: Note = { ...existing, ...patch, id: existing.id };
+      const updated: Note = {
+        ...existing,
+        ...patch,
+        id: existing.id,
+        updatedAt: patch.updatedAt ?? Date.now(),
+      };
       notes.set(id, updated);
       return { ...updated };
     },

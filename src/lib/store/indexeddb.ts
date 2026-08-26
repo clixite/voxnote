@@ -186,7 +186,12 @@ export function createIndexedDbNoteStore(
       if (!existing) {
         throw new NoteNotFoundError(id);
       }
-      const updated: Note = { ...existing, ...patch, id: existing.id };
+      const updated: Note = {
+        ...existing,
+        ...patch,
+        id: existing.id,
+        updatedAt: patch.updatedAt ?? Date.now(),
+      };
       await db.put("notes", updated);
       return updated;
     },
