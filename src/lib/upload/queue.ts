@@ -25,27 +25,34 @@
  * même chemin de blob, sans risque) ; un segment `uploaded`, `transcribing`,
  * ou `error` AVEC `blobUrl` ne reprend qu'à la transcription.
  *
- * Réservation par onglet (B2, revue sécurité) : `inFlight` est en mémoire,
- * donc par onglet — rien n'empêchait deux onglets ouverts sur la même note
- * de traiter le même segment en parallèle (upload payé deux fois, `allowOverwrite`
- * faisant réussir silencieusement le doublon plutôt que le rejeter). Les
- * champs `Segment.claimedBy`/`claimedAt` (contrat `src/types/notes.ts`)
- * persistent CETTE réservation : posée à l'entrée dans `uploading`/
- * `transcribing`, rafraîchie pendant tout le traitement effectif
- * (`withClaimHeartbeat`), relue par `collectQueueItems` qui n'accepte un
- * segment déjà réservé que si la réservation est la nôtre ou périmée (seuil
- * partagé avec le marqueur d'enregistrement, `STALE_THRESHOLD_MS` —
- * jamais redéfini ici), et libérée à la fin, succès comme échec.
+ * Réservation par onglet (B2, revue sécurité — deux passes) : `inFlight`
+ * est en mémoire, donc par onglet — rien n'empêchait deux onglets ouverts
+ * sur la même note de traiter le même segment en parallèle (upload payé
+ * deux fois, `allowOverwrite` faisant réussir silencieusement le doublon
+ * plutôt que le rejeter).
  *
- * Limite assumée : sans primitive atomique « réserver seulement si libre »
- * côté `NoteStore` (hors périmètre de ce module — `src/lib/store/**`), il
- * reste une fenêtre entre la lecture qui juge un segment libre et l'écriture
- * qui le réserve, où deux onglets pourraient en théorie lire « libre »
- * quasi simultanément. Cette réservation ferme le cas réaliste (un onglet
- * déjà au travail, l'autre sondant plus tard) qui cause la perte financière
- * réelle ; elle n'est pas une preuve d'exclusion mutuelle stricte au sens
- * distribué. Une garantie totale demanderait un « claim » atomique implémenté
- * comme une unique transaction IndexedDB au niveau du store.
+ * Une première version filtrait les segments déjà réservés dans
+ * `collectQueueItems` (lecture) avant d'écrire la réservation dans
+ * `runItem` — insuffisant : l'événement `online` réveille TOUS les onglets
+ * EN MÊME TEMPS après une coupure, donc tous lisent « libre » avant qu'aucun
+ * n'ait écrit. Démontré en revue : 6 transcriptions facturées pour 3
+ * segments, de façon déterministe. Le filtrage optimiste de
+ * `collectQueueItems` reste en place (il évite des tentatives de réservation
+ * inutiles), mais ce n'est plus lui qui décide : `store.claimSegment`
+ * réserve dans une seule transaction IndexedDB (voir `src/types/notes.ts`),
+ * ce qu'IndexedDB sérialise par construction sur un même object store —
+ * c'est la primitive d'exclusion mutuelle qui manquait. Seul un `claimSegment`
+ * qui renvoie `true` fait entrer un segment dans le lot traité (`runTick`).
+ *
+ * La réservation est rafraîchie pendant tout traitement effectif
+ * (`withClaimHeartbeat`, en réutilisant `claimSegment` lui-même — voir son
+ * commentaire), et libérée via `store.releaseSegment` sur succès. PAS sur un
+ * échec retryable : `retryState` (le backoff, le plafond "ambiguous") est en
+ * mémoire, par onglet, et libérer la réservation la rendrait immédiatement
+ * reprenable par un autre onglet qui n'a connaissance ni de l'un ni de
+ * l'autre — contournant le plafond de tentatives à deux onglets (deuxième
+ * défaut démontré par la même sonde). Voir l'argumentaire complet en tête de
+ * `handleFailure`.
  */
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -123,6 +130,8 @@ const DEFAULT_CONCURRENCY = 3;
 const DEFAULT_MAX_AMBIGUOUS_ATTEMPTS = 5;
 /** Nouvel essai après une lecture du `NoteStore` elle-même en échec (voir `runTick`). */
 const STORE_RETRY_DELAY_MS = 3000;
+/** Nouvel essai après une passe où aucune réservation atomique n'a abouti (voir `runTick`). */
+const CLAIM_CONTENTION_RETRY_MS = 1000;
 
 interface RetryBookkeeping {
   /** Échecs consécutifs depuis le dernier succès ou la dernière remise à zéro manuelle. */
@@ -158,12 +167,19 @@ function isMissingEntityError(err: unknown): boolean {
 }
 
 /**
- * `true` si CE segment peut être traité par `tabId` maintenant : jamais
- * réservé, réservé par `tabId` lui-même (reprise du même onglet après un
- * refresh, `claimedBy` vit dans `sessionStorage` — voir
- * `activeRecordingMarker.ts`), ou réservé mais périmé (onglet mort, ne doit
- * jamais bloquer un segment pour de bon — l'erreur symétrique, pire :
- * un segment jamais transcrit vaut moins qu'un segment transcrit deux fois).
+ * `true` si CE segment SEMBLE traitable par `tabId` maintenant, d'après une
+ * lecture non atomique : jamais réservé, réservé par `tabId` lui-même
+ * (reprise du même onglet après un refresh, `claimedBy` vit dans
+ * `sessionStorage` — voir `activeRecordingMarker.ts`), ou réservé mais
+ * périmé (onglet mort, ne doit jamais bloquer un segment pour de bon —
+ * l'erreur symétrique, pire : un segment jamais transcrit vaut moins qu'un
+ * segment transcrit deux fois).
+ *
+ * PUREMENT OPTIMISTE : sert uniquement de premier tri dans
+ * `collectQueueItems`, pour éviter d'appeler `store.claimSegment` sur des
+ * segments visiblement déjà pris. Ne décide jamais qui obtient réellement un
+ * segment — seul `claimSegment` (atomique) en est capable (voir le
+ * commentaire de tête du fichier).
  */
 export function isSegmentClaimAvailable(
   segment: Pick<Segment, "claimedBy" | "claimedAt">,
@@ -199,8 +215,11 @@ function toContext(segment: Segment, note: Note): QueueSegmentContext {
  *
  * `tabId` filtre au passage les segments réservés par un AUTRE onglet et
  * dont la réservation est encore fraîche (B2, voir `isSegmentClaimAvailable`)
- * : ils n'apparaissent tout simplement pas dans le résultat, cet onglet-ci
- * n'a rien à en faire tant que l'autre s'en occupe.
+ * : ils n'apparaissent tout simplement pas dans le résultat. Ce filtre est
+ * OPTIMISTE, pas décisionnel (voir le commentaire de tête de `runTick`) :
+ * il évite d'essayer de réserver des segments visiblement déjà pris, mais
+ * seul `store.claimSegment` — appelé ensuite, atomiquement — décide qui
+ * obtient réellement un segment.
  */
 export async function collectQueueItems(
   store: NoteStore,
@@ -389,6 +408,19 @@ export class UploadQueue {
    * attend la fin du lot plutôt que d'être immédiatement réoccupée) — un
    * compromis délibéré, sans incidence sur la garantie « zéro perte » ni sur
    * le plafond de concurrence lui-même, qui reste strictement respecté.
+   *
+   * Réservation (B2, deuxième passe de revue) : `collectQueueItems` ne fait
+   * qu'un premier tri OPTIMISTE — il évite d'essayer de réserver des
+   * segments visiblement déjà pris, mais son verdict n'est jamais celui qui
+   * décide. Entre cette lecture et l'écriture de réservation, une fenêtre
+   * existe (`listNotes` + `listPendingSegments` + un `listSegments` par
+   * note) — pas quelques microsecondes : la durée d'une passe complète.
+   * L'événement `online` réveille TOUS les onglets en même temps après une
+   * coupure ; sans verrou, chacun lirait « libre » avant qu'aucun n'ait
+   * écrit (démontré en revue : 6 transcriptions pour 3 segments). Seul
+   * `store.claimSegment` — une unique transaction IndexedDB, atomique par
+   * construction — décide réellement : un candidat n'entre dans le lot
+   * traité que si son appel a renvoyé `true`.
    */
   private async runTick(): Promise<void> {
     for (;;) {
@@ -475,15 +507,50 @@ export class UploadQueue {
         return;
       }
 
-      const batch = ready.slice(0, this.concurrency);
-      for (const item of batch) {
+      // Décision réelle : tente une réservation ATOMIQUE pour chaque
+      // candidat optimiste, dans l'ordre, jusqu'à `concurrency` réservations
+      // obtenues ou plus de candidats. Un `false` (un autre onglet a gagné
+      // la course) n'est jamais une erreur : ce candidat est simplement
+      // laissé de côté ce tour-ci, la prochaine relecture du store reflétera
+      // la réalité (sa réservation, désormais visible, l'exclura du tri
+      // optimiste suivant).
+      const claimed: QueueSegmentContext[] = [];
+      const staleBefore = now - STALE_THRESHOLD_MS;
+      for (const item of ready) {
+        if (claimed.length >= this.concurrency) break;
+        let ok: boolean;
+        try {
+          ok = await this.store.claimSegment(item.segmentId, this.tabId, staleBefore);
+        } catch {
+          // Panne du store en réservant : ni erreur de segment, ni succès —
+          // on n'insiste pas ce tour-ci, la prochaine relecture retentera.
+          continue;
+        }
+        if (ok) claimed.push(item);
+      }
+
+      if (claimed.length === 0) {
+        // Rien obtenu : soit tout était déjà pris pour de bon (rare — le
+        // tri optimiste l'aurait normalement déjà filtré), soit une course
+        // perdue de justesse. Dans les deux cas, retenter en boucle serrée
+        // n'aiderait pas : un court délai laisse la vraie réservation du
+        // gagnant se refléter avant la prochaine tentative.
+        this.wakeTimer = setTimeout(() => {
+          this.wakeTimer = undefined;
+          void this.tick();
+        }, CLAIM_CONTENTION_RETRY_MS);
+        this.emit();
+        return;
+      }
+
+      for (const item of claimed) {
         this.inFlight.add(item.segmentId);
         this.forcedNow.delete(item.segmentId);
       }
       this.emit();
 
       await Promise.all(
-        batch.map((item) =>
+        claimed.map((item) =>
           this.runItem(item).finally(() => {
             this.inFlight.delete(item.segmentId);
           }),
@@ -497,17 +564,27 @@ export class UploadQueue {
 
   /**
    * Pendant tout traitement effectif (upload ou transcription) d'un segment
-   * RÉSERVÉ, rafraîchit `claimedAt` à intervalle régulier — même cadence que
-   * le heartbeat du marqueur d'enregistrement (`HEARTBEAT_INTERVAL_MS`,
-   * choisie sous le pire cas de throttling des onglets d'arrière-plan). Sans
-   * ça, un traitement plus long que `STALE_THRESHOLD_MS` (transcription
-   * lente, upload sur réseau mobile faible) serait vu comme abandonné par un
-   * autre onglet, qui se remettrait alors à le traiter en parallèle —
-   * exactement le double traitement que la réservation existe pour éviter.
+   * déjà réservé (par `runTick`, avant d'appeler `runItem`), rafraîchit la
+   * réservation à intervalle régulier — même cadence que le heartbeat du
+   * marqueur d'enregistrement (`HEARTBEAT_INTERVAL_MS`, choisie sous le pire
+   * cas de throttling des onglets d'arrière-plan). Sans ça, un traitement
+   * plus long que `STALE_THRESHOLD_MS` (transcription lente, upload sur
+   * réseau mobile faible) serait vu comme abandonné par un autre onglet, qui
+   * se remettrait alors à le traiter en parallèle.
+   *
+   * Réutilise `claimSegment` plutôt qu'une écriture `updateSegment` brute :
+   * c'est ce qui rend le rafraîchissement conditionnel à la propriété de la
+   * réservation SANS code séparé pour le vérifier (détail relevé en revue —
+   * un heartbeat qui écrirait `claimedAt` sans revérifier `claimedBy`
+   * rafraîchirait la réservation d'un AUTRE onglet si celui-ci avait repris
+   * un segment entre-temps déclaré périmé). `claimSegment` refuse déjà tout
+   * ce qui n'est pas "libre, à nous, ou périmé" — le heartbeat en hérite
+   * gratuitement.
    */
   private async withClaimHeartbeat<T>(segmentId: string, work: () => Promise<T>): Promise<T> {
     const timer = setInterval(() => {
-      void this.store.updateSegment(segmentId, { claimedAt: this.now() }).catch(() => {
+      const staleBefore = this.now() - STALE_THRESHOLD_MS;
+      void this.store.claimSegment(segmentId, this.tabId, staleBefore).catch(() => {
         // Best-effort : un raté de heartbeat n'interrompt pas le travail en
         // cours, seul son résultat final compte pour le statut du segment.
       });
@@ -519,6 +596,14 @@ export class UploadQueue {
     }
   }
 
+  /**
+   * Traite UN segment déjà réservé avec succès par `runTick` (voir
+   * `store.claimSegment`, appelé avant que ce segment n'atteigne cette
+   * méthode) : `runItem` ne réserve plus rien lui-même, il tient la
+   * réservation déjà acquise (rafraîchie par `withClaimHeartbeat`) et la
+   * libère explicitement à la fin — voir `handleFailure` pour l'argumentaire
+   * sur QUAND la libérer en cas d'échec.
+   */
   private async runItem(item: QueueSegmentContext): Promise<void> {
     try {
       let blobUrl = item.blobUrl;
@@ -526,8 +611,6 @@ export class UploadQueue {
         await this.store.updateSegment(item.segmentId, {
           status: "uploading",
           attempts: item.attempts + 1,
-          claimedBy: this.tabId,
-          claimedAt: this.now(),
         });
         this.emit();
         blobUrl = await this.withClaimHeartbeat(item.segmentId, () => this.uploadSegment(item));
@@ -535,8 +618,6 @@ export class UploadQueue {
           status: "uploaded",
           blobUrl,
           error: undefined,
-          claimedBy: this.tabId,
-          claimedAt: this.now(),
         });
         this.emit();
       }
@@ -546,11 +627,7 @@ export class UploadQueue {
       // cette certitude — TypeScript la revérifierait sinon à chaque appel.
       const resolvedBlobUrl: string = blobUrl;
 
-      await this.store.updateSegment(item.segmentId, {
-        status: "transcribing",
-        claimedBy: this.tabId,
-        claimedAt: this.now(),
-      });
+      await this.store.updateSegment(item.segmentId, { status: "transcribing" });
       this.emit();
       const result = await this.withClaimHeartbeat(item.segmentId, () =>
         this.transcribeSegment({ ...item, blobUrl: resolvedBlobUrl }),
@@ -562,13 +639,9 @@ export class UploadQueue {
         provider: result.provider,
         createdAt: this.now(),
       });
+      await this.store.updateSegment(item.segmentId, { status: "done", error: undefined });
       // Réservation libérée : succès, plus personne n'a besoin d'y revenir.
-      await this.store.updateSegment(item.segmentId, {
-        status: "done",
-        error: undefined,
-        claimedBy: undefined,
-        claimedAt: undefined,
-      });
+      await this.store.releaseSegment(item.segmentId, this.tabId).catch(() => {});
       this.retryState.delete(item.segmentId);
       await this.syncNote(item.noteId);
     } catch (rawError) {
@@ -603,6 +676,30 @@ export class UploadQueue {
    * protection. La seule suppression volontaire de l'entrée est le cas
    * "segment/note disparu" (`isMissingEntityError`) : légitime, puisque
    * "vivant" est justement la condition de l'invariant.
+   *
+   * RÉSERVATION (B2, deuxième passe de revue) : la libérer sur TOUT échec —
+   * y compris retryable — a été essayé, et cassé le plafond de tentatives à
+   * deux onglets : `retryState` est en mémoire, PAR ONGLET, alors qu'une
+   * réservation libérée redevient immédiatement prenable par n'importe qui.
+   * Après un premier échec, un autre onglet la reprenait donc aussitôt, sans
+   * connaître ni le backoff ni le compteur "ambiguous" du premier — le
+   * plafond de tentatives se retrouvait contourné à deux, en pratique
+   * inexistant.
+   *
+   * La règle retenue : la réservation n'est PAS libérée sur un échec
+   * retryable ou "ambiguous" pas encore épuisé — cet onglet la garde, c'est
+   * lui qui réessaiera après son propre backoff (rafraîchie au besoin par un
+   * futur passage dans `withClaimHeartbeat` si le prochain essai est encore
+   * loin ; en pratique `STALE_THRESHOLD_MS` largement au-dessus de tout
+   * backoff plausible ici la rend rarement nécessaire). Si cet onglet meurt
+   * avant de réessayer, la réservation devient périmée toute seule et un
+   * autre onglet la reprend alors — c'est le comportement voulu, symétrique
+   * à celui d'un traitement interrompu. Elle N'EST libérée que sur arrêt
+   * DÉFINITIF (`tier === "non-retryable"`) : plus aucun essai automatique
+   * n'est prévu de ce côté, rien ne justifie de la garder — au contraire, la
+   * libérer permet un réessai manuel (bouton Réessayer) ou par un autre
+   * onglet sans attendre une péremption qui n'aurait plus aucun sens à
+   * protéger.
    */
   private async handleFailure(item: QueueSegmentContext, rawError: unknown): Promise<void> {
     const classification = classifyUploadError(rawError);
@@ -640,16 +737,7 @@ export class UploadQueue {
     this.retryState.set(item.segmentId, state);
 
     try {
-      // Réservation libérée ici aussi (B2) : succès comme échec, personne ne
-      // doit rester marqué "en cours" pour un segment qui ne l'est plus. Le
-      // prochain essai (auto, par CET onglet ou un autre) repart d'une
-      // réservation propre plutôt que d'attendre la péremption.
-      await this.store.updateSegment(item.segmentId, {
-        status: "error",
-        error: message,
-        claimedBy: undefined,
-        claimedAt: undefined,
-      });
+      await this.store.updateSegment(item.segmentId, { status: "error", error: message });
     } catch (writeErr) {
       if (isMissingEntityError(writeErr)) {
         // Segment/note réellement disparu (RGPD) : plus rien à retenter.
@@ -661,8 +749,15 @@ export class UploadQueue {
       // Panne de stockage en écrivant l'échec lui-même : le statut réel du
       // segment reste ce qu'il était (l'écriture a échoué), mais
       // `retryState` porte déjà le prochain rendez-vous posé ci-dessus — le
-      // prochain tick ne le retentera pas avant son heure.
+      // prochain tick ne le retentera pas avant son heure. La réservation,
+      // elle, n'est pas touchée non plus : elle expirera d'elle-même si
+      // personne ne revient (voir l'argumentaire ci-dessus).
       return;
+    }
+
+    if (tier === "non-retryable") {
+      // Arrêt définitif : voir l'argumentaire ci-dessus sur QUAND libérer.
+      await this.store.releaseSegment(item.segmentId, this.tabId).catch(() => {});
     }
 
     await this.syncNote(item.noteId).catch(() => {});

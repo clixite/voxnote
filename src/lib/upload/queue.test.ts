@@ -651,7 +651,7 @@ describe("UploadQueue", () => {
       expect(seg.claimedBy).toBe("tab-other");
     });
 
-    it("la réservation est libérée après un échec : le segment reste reprenable, même par un autre onglet, sans attendre le backoff du premier", async () => {
+    it("un échec RÉESSAYABLE garde la réservation : un autre onglet ne peut pas contourner le backoff/plafond en mémoire du premier", async () => {
       const store = createMemoryNoteStore();
       const note = await makeProcessingNote(store);
       await store.appendSegment({
@@ -663,7 +663,57 @@ describe("UploadQueue", () => {
       });
 
       const failingUpload: UploadSegmentFn = vi.fn(async () => {
-        throw new TypeError("Failed to fetch");
+        throw new TypeError("Failed to fetch"); // retryable
+      });
+      const queueA = new UploadQueue({
+        store,
+        uploadSegment: failingUpload,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-a",
+      });
+      await queueA.start();
+
+      const seg = await firstSegment(store, note.id);
+      expect(seg.status).toBe("error");
+      // La réservation reste tenue par tab-a : c'est lui qui réessaiera
+      // après SON backoff — la libérer laisserait tab-b la reprendre tout de
+      // suite, sans connaître ni ce backoff ni le plafond "ambiguous" de
+      // tab-a (deuxième défaut démontré par la revue : le plafond de
+      // tentatives se retrouvait contourné à deux onglets).
+      expect(seg.claimedBy).toBe("tab-a");
+      expect(seg.claimedAt).toBeDefined();
+
+      const uploadB = immediateUpload();
+      const queueB = new UploadQueue({
+        store,
+        uploadSegment: uploadB,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-b",
+      });
+      await queueB.start();
+
+      expect(uploadB).not.toHaveBeenCalled();
+    });
+
+    it("un arrêt DÉFINITIF (non-retryable) libère la réservation : le segment est repris immédiatement, par n'importe quel onglet", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+
+      const failingUpload: UploadSegmentFn = vi.fn(async () => {
+        throw new ApiRequestError({
+          error: "AUDIO_UNREADABLE",
+          message: "Ce passage audio est illisible.",
+          retryable: false,
+        });
       });
       const queueA = new UploadQueue({
         store,
@@ -679,9 +729,8 @@ describe("UploadQueue", () => {
       expect(seg.claimedBy).toBeUndefined();
       expect(seg.claimedAt).toBeUndefined();
 
-      // tab-b n'a aucune idée du backoff en mémoire de tab-a : la
-      // réservation libérée suffit à lui permettre de reprendre tout de
-      // suite, plutôt que de laisser le segment bloqué en attendant tab-a.
+      // Plus aucun essai automatique n'est prévu côté tab-a pour ce segment :
+      // rien ne justifie de continuer à le bloquer pour lui.
       const uploadB = immediateUpload();
       const queueB = new UploadQueue({
         store,
@@ -749,6 +798,69 @@ describe("UploadQueue", () => {
 
       const seg = await firstSegment(store, note.id);
       expect(seg.status).toBe("done");
+    });
+
+    it("deux files réveillées SIMULTANÉMENT sur un backlog ne facturent jamais deux fois le même segment (sonde de la deuxième revue)", async () => {
+      // Le scénario réel : l'événement 'online' est délivré à tous les
+      // onglets EN MÊME TEMPS après une coupure — pas l'un après l'autre.
+      // Aucun `flushMicrotasks` ni décalage volontaire ici : les deux
+      // `start()` partent dans le même appel `Promise.all`, exactement comme
+      // deux écouteurs 'online' déclenchés par le même événement navigateur.
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      const segmentCount = 4;
+      for (let seq = 0; seq < segmentCount; seq += 1) {
+        await store.appendSegment({
+          noteId: note.id,
+          seq,
+          blob: new Blob([`audio-${seq}`]),
+          mimeType: "audio/webm",
+          durationMs: 1000,
+        });
+      }
+
+      const transcriptions: string[] = [];
+      const makeTranscribe = (tab: string): TranscribeSegmentFn =>
+        vi.fn(async (ctx) => {
+          transcriptions.push(`${tab}:${ctx.segmentId}`);
+          return { text: `texte ${tab} seq${ctx.seq}`, provider: "groq" };
+        });
+
+      const queueA = new UploadQueue({
+        store,
+        uploadSegment: immediateUpload(),
+        transcribeSegment: makeTranscribe("A"),
+        isOnline: () => true,
+        tabId: "tab-a",
+        concurrency: segmentCount,
+      });
+      const queueB = new UploadQueue({
+        store,
+        uploadSegment: immediateUpload(),
+        transcribeSegment: makeTranscribe("B"),
+        isOnline: () => true,
+        tabId: "tab-b",
+        concurrency: segmentCount,
+      });
+
+      await Promise.all([queueA.start(), queueB.start()]);
+
+      // C'est ce compteur qui révèle la double facturation : l'état final
+      // (tous les segments "done") a l'air parfaitement normal dans les
+      // deux cas, avec ou sans le correctif.
+      expect(transcriptions).toHaveLength(segmentCount);
+      const countBySegment = new Map<string, number>();
+      for (const entry of transcriptions) {
+        const segmentId = entry.split(":")[1] ?? "";
+        countBySegment.set(segmentId, (countBySegment.get(segmentId) ?? 0) + 1);
+      }
+      expect(countBySegment.size).toBe(segmentCount);
+      for (const count of countBySegment.values()) {
+        expect(count).toBe(1);
+      }
+
+      const segments = await store.listSegments(note.id);
+      expect(segments.every((s) => s.status === "done")).toBe(true);
     });
   });
 });
