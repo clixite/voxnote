@@ -83,6 +83,44 @@ function filenameForMimeType(mimeType: string): string {
   return `segment.${extension}`;
 }
 
+/**
+ * Valide `result_url` (renvoyé par l'init du job) et le ramène à un chemin
+ * relatif à `GLADIA_BASE_URL`, pour réutiliser `callGladia`.
+ *
+ * Revue S5 (2026-08-26) : un simple `job.result_url.replace(GLADIA_BASE_URL, "")`
+ * lève un `TypeError` non typé si `result_url` est absent ou n'est pas une
+ * chaîne (le cast `as GladiaInitResponse` ne garantit rien à l'exécution),
+ * qui remontait alors en 500 non réessayable au lieu d'une erreur classifiée.
+ * `new URL(...)` avec contrôle d'origine ET de préfixe de chemin est plus
+ * honnête : une réponse Gladia mal formée devient une `TranscriptionError`
+ * explicite, pas un plantage.
+ */
+function parseGladiaResultPath(resultUrl: unknown): string {
+  if (typeof resultUrl !== "string" || resultUrl.length === 0) {
+    throw audioUnreadableError(
+      "Réponse Gladia invalide : result_url manquant à l'initialisation du job.",
+    );
+  }
+
+  let parsed: URL;
+  try {
+    parsed = new URL(resultUrl);
+  } catch {
+    throw audioUnreadableError(
+      `Réponse Gladia invalide : result_url mal formée (${resultUrl}).`,
+    );
+  }
+
+  const base = new URL(GLADIA_BASE_URL);
+  if (parsed.origin !== base.origin || !parsed.pathname.startsWith(base.pathname)) {
+    throw audioUnreadableError(
+      `Réponse Gladia invalide : result_url hors du domaine ou du chemin attendu (${resultUrl}).`,
+    );
+  }
+
+  return `${parsed.pathname.slice(base.pathname.length)}${parsed.search}`;
+}
+
 /** Classification par code de statut HTTP, identique en esprit à celle des providers compatibles OpenAI. */
 function translateStatusError(status: number, detail: string): TranscriptionError {
   if (status === 401 || status === 403) {
@@ -180,7 +218,7 @@ export function createGladiaProvider(
       const job = (await initResponse.json()) as GladiaInitResponse;
 
       // 3. Sondage borné du résultat.
-      const resultPath = job.result_url.replace(GLADIA_BASE_URL, "");
+      const resultPath = parseGladiaResultPath(job.result_url);
       for (let attempt = 0; attempt < maxPollAttempts; attempt += 1) {
         const pollResponse = await callGladia(apiKey, resultPath, {
           method: "GET",

@@ -1,11 +1,11 @@
 // @vitest-environment node
-import { describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@vercel/blob", () => ({
-  get: vi.fn(),
+vi.mock("@/lib/blob/store", () => ({
+  getBlobStream: vi.fn(),
 }));
 
-import { get } from "@vercel/blob";
+import { getBlobStream } from "@/lib/blob/store";
 
 import { downloadBlobAudio } from "./audio-source";
 import { TranscriptionError } from "./errors";
@@ -25,10 +25,14 @@ function fakeStream(chunks: Uint8Array[]): ReadableStream<Uint8Array> {
 }
 
 describe("downloadBlobAudio", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
   it("télécharge et concatène les octets d'un blob existant", async () => {
     const part1 = new Uint8Array([1, 2, 3]);
     const part2 = new Uint8Array([4, 5]);
-    vi.mocked(get).mockResolvedValue({
+    vi.mocked(getBlobStream).mockResolvedValue({
       statusCode: 200,
       stream: fakeStream([part1, part2]),
       headers: new Headers(),
@@ -50,10 +54,26 @@ describe("downloadBlobAudio", () => {
 
     expect(Array.from(result.bytes)).toEqual([1, 2, 3, 4, 5]);
     expect(result.contentType).toBe("audio/webm");
+    expect(getBlobStream).toHaveBeenCalledWith(
+      "https://example.public.blob.vercel-storage.com/audio/note-1/0",
+      { abortSignal: undefined },
+    );
+  });
+
+  it("BLOB_READ_WRITE_TOKEN manquant (BlobConfigError depuis getBlobStream) → SERVER_MISCONFIGURED, non réessayable", async () => {
+    const error = new Error(
+      "Le stockage audio n'est pas configuré (BLOB_READ_WRITE_TOKEN manquant).",
+    );
+    error.name = "BlobConfigError";
+    vi.mocked(getBlobStream).mockRejectedValue(error);
+
+    await expect(
+      downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
+    ).rejects.toMatchObject({ code: "SERVER_MISCONFIGURED", retryable: false });
   });
 
   it("blob introuvable (null) → AUDIO_UNREADABLE, non réessayable", async () => {
-    vi.mocked(get).mockResolvedValue(null);
+    vi.mocked(getBlobStream).mockResolvedValue(null);
 
     const promise = downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0");
     await expect(promise).rejects.toBeInstanceOf(TranscriptionError);
@@ -63,7 +83,7 @@ describe("downloadBlobAudio", () => {
   it("BlobNotFoundError → AUDIO_UNREADABLE", async () => {
     const error = new Error("not found");
     error.name = "BlobNotFoundError";
-    vi.mocked(get).mockRejectedValue(error);
+    vi.mocked(getBlobStream).mockRejectedValue(error);
 
     await expect(
       downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
@@ -73,17 +93,37 @@ describe("downloadBlobAudio", () => {
   it("BlobAccessError (jeton sans accès) → SERVER_MISCONFIGURED, non réessayable", async () => {
     const error = new Error("forbidden");
     error.name = "BlobAccessError";
-    vi.mocked(get).mockRejectedValue(error);
+    vi.mocked(getBlobStream).mockRejectedValue(error);
 
     await expect(
       downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
     ).rejects.toMatchObject({ code: "SERVER_MISCONFIGURED", retryable: false });
   });
 
-  it("panne du service Blob → PROVIDER_UNAVAILABLE, réessayable", async () => {
+  it("BlobStoreNotFoundError → SERVER_MISCONFIGURED, non réessayable", async () => {
+    const error = new Error("store not found");
+    error.name = "BlobStoreNotFoundError";
+    vi.mocked(getBlobStream).mockRejectedValue(error);
+
+    await expect(
+      downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
+    ).rejects.toMatchObject({ code: "SERVER_MISCONFIGURED", retryable: false });
+  });
+
+  it("panne du service Blob (BlobServiceNotAvailable) → PROVIDER_UNAVAILABLE, réessayable", async () => {
     const error = new Error("service unavailable");
     error.name = "BlobServiceNotAvailable";
-    vi.mocked(get).mockRejectedValue(error);
+    vi.mocked(getBlobStream).mockRejectedValue(error);
+
+    await expect(
+      downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
+    ).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", retryable: true });
+  });
+
+  it("Blob rate-limited (BlobServiceRateLimited) → PROVIDER_UNAVAILABLE, réessayable", async () => {
+    const error = new Error("rate limited");
+    error.name = "BlobServiceRateLimited";
+    vi.mocked(getBlobStream).mockRejectedValue(error);
 
     await expect(
       downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),
@@ -91,7 +131,7 @@ describe("downloadBlobAudio", () => {
   });
 
   it("erreur réseau inattendue → PROVIDER_UNAVAILABLE par défaut (favorise le réessai)", async () => {
-    vi.mocked(get).mockRejectedValue(new TypeError("fetch failed"));
+    vi.mocked(getBlobStream).mockRejectedValue(new TypeError("fetch failed"));
 
     await expect(
       downloadBlobAudio("https://example.public.blob.vercel-storage.com/audio/note-1/0"),

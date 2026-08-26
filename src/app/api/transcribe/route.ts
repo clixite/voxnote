@@ -9,10 +9,12 @@
  * session valide — pas de second contrôle de session ici.
  */
 
-import { head } from "@vercel/blob";
 import { NextResponse } from "next/server";
 
 import { getClientIp } from "@/lib/auth/ip";
+import { headBlob } from "@/lib/blob/store";
+import { isValidNoteId } from "@/lib/blob/validation";
+import { translateBlobError } from "@/lib/transcription/blob-errors";
 import { isRateLimited } from "@/lib/transcription/rate-limit";
 import { getTranscriptionProvider } from "@/lib/transcription/registry";
 import { resolveProviderId } from "@/lib/transcription/provider-id";
@@ -27,9 +29,9 @@ import {
 } from "@/types/api";
 import type { LangSetting } from "@/types/notes";
 
-// @vercel/blob (`head`, et le téléchargement fait par les providers via
-// `downloadBlobAudio`) s'appuie sur `undici` : runtime Node explicite, pas
-// edge.
+// `@/lib/blob/store` (`headBlob`, et `getBlobStream` utilisé par les
+// providers via `downloadBlobAudio`) s'appuie sur `@vercel/blob`/`undici` :
+// runtime Node explicite, pas edge.
 export const runtime = "nodejs";
 
 // Groq répond en quelques secondes ; Gladia (upload + job + polling borné,
@@ -150,8 +152,15 @@ async function readBoundedBody(
   return { ok: true, text: new TextDecoder().decode(merged) };
 }
 
-function isValidNoteId(value: unknown): value is string {
-  return typeof value === "string" && value.length > 0 && value.length <= 200;
+/**
+ * Forme UUID réutilisée depuis `@/lib/blob/validation` : même contrat que
+ * `/api/blob/upload-token`, pas de validation dupliquée et divergente entre
+ * les deux routes (revue S4, 2026-08-26). `isValidNoteId` du module importé
+ * prend un `string`, pas un `unknown` : ce wrapper ajoute juste le contrôle
+ * de type nécessaire pour un champ JSON non typé.
+ */
+function isValidNoteIdValue(value: unknown): value is string {
+  return typeof value === "string" && isValidNoteId(value);
 }
 
 function isValidSeq(value: unknown): value is number {
@@ -183,7 +192,7 @@ function parseRequestBody(raw: unknown): TranscribeRequestBody | undefined {
   if (typeof raw !== "object" || raw === null) return undefined;
   const { noteId, seq, blobUrl, mimeType, lang } = raw as Record<string, unknown>;
   if (
-    !isValidNoteId(noteId) ||
+    !isValidNoteIdValue(noteId) ||
     !isValidSeq(seq) ||
     !isValidBlobUrl(blobUrl) ||
     !isValidMimeType(mimeType) ||
@@ -194,29 +203,61 @@ function parseRequestBody(raw: unknown): TranscribeRequestBody | undefined {
   return { noteId, seq, blobUrl, mimeType, lang };
 }
 
+type BlobOwnershipCheck =
+  | { status: "owned" }
+  /** `blobUrl` n'est vraiment pas le bon segment : réponse 400 non réessayable. */
+  | { status: "invalid" }
+  /** Panne d'infra Blob ou mauvaise configuration : jamais un verdict sur la donnée. */
+  | { status: "error"; error: TranscriptionError };
+
 /**
  * Garde anti-SSRF : vérifie que `blobUrl` appartient bien à NOTRE store
- * Blob (authentifié via `BLOB_READ_WRITE_TOKEN`) avant tout téléchargement,
- * ET qu'il correspond exactement au segment annoncé (`noteId`/`seq`) — pas
- * seulement à un blob quelconque de notre store. Sans ce second contrôle, une
- * URL de blob volée (une autre note, un autre segment) serait acceptée tant
- * qu'elle nous appartient. `head()` interroge l'API de gestion Vercel Blob
- * avec notre jeton ; elle ne fait JAMAIS de requête vers `blobUrl`
- * directement (voir `src/lib/transcription/audio-source.ts`), donc rien ici
- * ne peut servir à sonder une adresse arbitraire au nom du serveur.
+ * Blob avant tout téléchargement, ET qu'il correspond exactement au segment
+ * annoncé (`noteId`/`seq`) — pas seulement à un blob quelconque de notre
+ * store. Sans ce second contrôle, une URL de blob volée (une autre note, un
+ * autre segment) serait acceptée tant qu'elle nous appartient.
+ *
+ * Passe par `headBlob()` (`@/lib/blob/store`, revue C4 : le jeton
+ * `BLOB_READ_WRITE_TOKEN` y est injecté explicitement, jamais le repli
+ * implicite du SDK) plutôt que d'importer `@vercel/blob` directement — c'est
+ * la seule porte d'entrée du SDK dans le projet. `headBlob` interroge l'API
+ * de gestion Vercel Blob avec notre jeton ; elle ne fait JAMAIS de requête
+ * vers `blobUrl` directement (voir `src/lib/transcription/audio-source.ts`),
+ * donc rien ici ne peut servir à sonder une adresse arbitraire au nom du
+ * serveur.
+ *
+ * Revue BLOQUANTE B3 (2026-08-26) : un `catch` nu qui traite toute erreur
+ * `headBlob()` comme « blob invalide » condamnerait définitivement un
+ * segment déjà uploadé à la moindre panne passagère du service Blob (le
+ * client classerait la réponse 400 comme non réessayable). Seul un vrai
+ * `BlobNotFoundError` — le blob n'est vraiment pas le nôtre — justifie ce
+ * verdict ; toute autre erreur (réseau, panne, jeton absent) doit rester
+ * réessayable ou signaler une mauvaise configuration, jamais un mensonge sur
+ * la donnée elle-même.
  */
-async function verifyBlobOwnership(
+async function checkBlobOwnership(
   blobUrl: string,
   noteId: string,
   seq: number,
-): Promise<boolean> {
+): Promise<BlobOwnershipCheck> {
   let meta;
   try {
-    meta = await head(blobUrl);
-  } catch {
-    return false;
+    meta = await headBlob(blobUrl);
+  } catch (error) {
+    const translated = translateBlobError(error);
+    if (translated.code === "AUDIO_UNREADABLE") {
+      // Vraiment introuvable dans notre store : c'est un lien invalide, pas
+      // une panne. On garde le message existant (§ `invalidBlobUrl`), pas le
+      // libellé générique "audio illisible" pensé pour une transcription.
+      return { status: "invalid" };
+    }
+    return { status: "error", error: translated };
   }
-  return meta.pathname === `audio/${noteId}/${seq}`;
+
+  if (meta.pathname !== `audio/${noteId}/${seq}`) {
+    return { status: "invalid" };
+  }
+  return { status: "owned" };
 }
 
 function transcriptionErrorResponse(
@@ -273,9 +314,12 @@ export async function POST(request: Request): Promise<NextResponse> {
     return rateLimited();
   }
 
-  const ownsBlob = await verifyBlobOwnership(blobUrl, noteId, seq);
-  if (!ownsBlob) {
+  const ownership = await checkBlobOwnership(blobUrl, noteId, seq);
+  if (ownership.status === "invalid") {
     return invalidBlobUrl();
+  }
+  if (ownership.status === "error") {
+    return transcriptionErrorResponse(ownership.error, { noteId, seq });
   }
 
   let providerId;

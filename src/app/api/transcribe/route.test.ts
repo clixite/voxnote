@@ -1,20 +1,22 @@
 // @vitest-environment node
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("@vercel/blob", () => ({
-  head: vi.fn(),
-  get: vi.fn(),
+vi.mock("@/lib/blob/store", () => ({
+  headBlob: vi.fn(),
+  getBlobStream: vi.fn(),
 }));
 
-import { get, head } from "@vercel/blob";
+import { getBlobStream, headBlob } from "@/lib/blob/store";
 
 import { resetRateLimitStateForTests } from "@/lib/transcription/rate-limit";
 
 import { POST } from "./route";
 
-const NOTE_ID = "note-1";
+// `noteId` doit être un UUID (revue S4 : même contrat que `/api/blob/upload-token`,
+// voir `@/lib/blob/validation#isValidNoteId`).
+const NOTE_ID = "550e8400-e29b-41d4-a716-446655440000";
 const SEQ = 0;
-const BLOB_URL = "https://example.public.blob.vercel-storage.com/audio/note-1/0";
+const BLOB_URL = `https://example.public.blob.vercel-storage.com/audio/${NOTE_ID}/0`;
 const MIME_TYPE = "audio/webm";
 
 let ipCounter = 0;
@@ -49,9 +51,15 @@ function validBody(overrides: Partial<Record<string, unknown>> = {}) {
   };
 }
 
+function namedError(name: string, message = name): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
 /** Fait passer la garde anti-SSRF : le blob appartient à notre store et au bon segment. */
 function stubOwnedBlob(pathname = `audio/${NOTE_ID}/${SEQ}`) {
-  vi.mocked(head).mockResolvedValue({
+  vi.mocked(headBlob).mockResolvedValue({
     url: BLOB_URL,
     downloadUrl: BLOB_URL,
     pathname,
@@ -80,7 +88,7 @@ function fakeAudioStream(): ReadableStream<Uint8Array> {
 
 /** Un nouveau flux à chaque appel : un réessai retélécharge le segment. */
 function stubAudioDownload() {
-  vi.mocked(get).mockImplementation(async () => ({
+  vi.mocked(getBlobStream).mockImplementation(async () => ({
     statusCode: 200,
     stream: fakeAudioStream(),
     headers: new Headers(),
@@ -144,6 +152,11 @@ describe("POST /api/transcribe", () => {
       "https://api.groq.com/openai/v1/audio/transcriptions",
       expect.anything(),
     );
+    // Revue C4 : la route et les providers passent par `@/lib/blob/store`
+    // (seule porte d'entrée du SDK Blob dans le projet), jamais par
+    // `@vercel/blob` directement — c'est cette couche qui injecte le jeton.
+    expect(headBlob).toHaveBeenCalledWith(BLOB_URL);
+    expect(getBlobStream).toHaveBeenCalledWith(BLOB_URL, { abortSignal: undefined });
   });
 
   it("succès (openai) : 200, appelle bien l'API OpenAI", async () => {
@@ -266,6 +279,7 @@ describe("POST /api/transcribe", () => {
 
   it.each([
     ["noteId manquant", { noteId: undefined }],
+    ["noteId pas un UUID", { noteId: "note-1" }],
     ["seq négatif", { seq: -1 }],
     ["seq non entier", { seq: 1.5 }],
     ["mimeType hors liste blanche", { mimeType: "video/mp4" }],
@@ -279,7 +293,7 @@ describe("POST /api/transcribe", () => {
   });
 
   it("blobUrl étranger à notre store (mauvais pathname) → refus, jamais téléchargé", async () => {
-    stubOwnedBlob("audio/une-autre-note/0");
+    stubOwnedBlob("audio/550e8400-e29b-41d4-a716-000000000000/0");
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
@@ -288,18 +302,98 @@ describe("POST /api/transcribe", () => {
     expect(response.status).toBe(400);
     const json = await response.json();
     expect(json.error).toBe("BAD_REQUEST");
-    expect(vi.mocked(get)).not.toHaveBeenCalled();
+    expect(vi.mocked(getBlobStream)).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("blobUrl qui n'appartient pas à notre store (head() échoue) → refus", async () => {
-    vi.mocked(head).mockRejectedValue(new Error("not found in this store"));
+  // Revue BLOQUANTE B3 (2026-08-26) : headBlob() doit classer ses erreurs par
+  // nature — un blob vraiment introuvable n'est pas une panne d'infra, et
+  // réciproquement. Un `catch` nu qui renverrait 400 dans tous les cas
+  // condamnerait définitivement (retryable:false) un segment déjà uploadé à
+  // la moindre panne passagère du service Blob.
+  it("blobUrl vraiment introuvable dans notre store (BlobNotFoundError) → 400, non réessayable", async () => {
+    vi.mocked(headBlob).mockRejectedValue(namedError("BlobNotFoundError"));
     const fetchMock = vi.fn();
     vi.stubGlobal("fetch", fetchMock);
 
     const response = await POST(transcribeRequest(validBody()));
 
     expect(response.status).toBe(400);
+    const json = await response.json();
+    expect(json).toEqual({
+      error: "BAD_REQUEST",
+      message: "Ce lien audio n'est pas valide pour cette note.",
+      retryable: false,
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["BlobServiceNotAvailable", "BlobServiceRateLimited"])(
+    "panne passagère du service Blob (%s) à headBlob() → 503 PROVIDER_UNAVAILABLE, réessayable (jamais un verdict définitif)",
+    async (name) => {
+      vi.mocked(headBlob).mockRejectedValue(namedError(name));
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const response = await POST(transcribeRequest(validBody()));
+
+      expect(response.status).toBe(503);
+      const json = await response.json();
+      expect(json).toMatchObject({ error: "PROVIDER_UNAVAILABLE", retryable: true });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("erreur réseau ou inconnue (sans nom reconnu) à headBlob() → 503 PROVIDER_UNAVAILABLE, réessayable", async () => {
+    vi.mocked(headBlob).mockRejectedValue(new TypeError("fetch failed"));
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(transcribeRequest(validBody()));
+
+    expect(response.status).toBe(503);
+    const json = await response.json();
+    expect(json).toMatchObject({ error: "PROVIDER_UNAVAILABLE", retryable: true });
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each(["BlobAccessError", "BlobStoreNotFoundError"])(
+    "jeton sans accès à ce store (%s) à headBlob() → 500 SERVER_MISCONFIGURED, non réessayable",
+    async (name) => {
+      vi.mocked(headBlob).mockRejectedValue(namedError(name));
+      const fetchMock = vi.fn();
+      vi.stubGlobal("fetch", fetchMock);
+
+      const response = await POST(transcribeRequest(validBody()));
+
+      expect(response.status).toBe(500);
+      const json = await response.json();
+      expect(json).toEqual({
+        error: "SERVER_MISCONFIGURED",
+        message: "Configuration du serveur invalide. Contacte l'administrateur.",
+        retryable: false,
+      });
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it("BLOB_READ_WRITE_TOKEN absent (BlobConfigError depuis headBlob()) → 500 SERVER_MISCONFIGURED, non réessayable", async () => {
+    vi.mocked(headBlob).mockRejectedValue(
+      namedError(
+        "BlobConfigError",
+        "Le stockage audio n'est pas configuré (BLOB_READ_WRITE_TOKEN manquant).",
+      ),
+    );
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+
+    const response = await POST(transcribeRequest(validBody()));
+
+    expect(response.status).toBe(500);
+    const json = await response.json();
+    expect(json.error).toBe("SERVER_MISCONFIGURED");
+    expect(json.retryable).toBe(false);
+    expect(vi.mocked(getBlobStream)).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
@@ -314,7 +408,7 @@ describe("POST /api/transcribe", () => {
     const json = await response.json();
     expect(json.error).toBe("PAYLOAD_TOO_LARGE");
     expect(json.retryable).toBe(false);
-    expect(vi.mocked(head)).not.toHaveBeenCalled();
+    expect(vi.mocked(headBlob)).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
   });
 

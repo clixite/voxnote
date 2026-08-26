@@ -160,4 +160,30 @@ describe("createGladiaProvider", () => {
       provider.transcribe({ audioUrl: AUDIO_URL, mimeType: "audio/webm" }),
     ).rejects.toMatchObject({ code: "PROVIDER_UNAVAILABLE", retryable: true });
   });
+
+  // Revue S5 (2026-08-26) : une réponse d'init malformée ne doit jamais
+  // planter en TypeError non typé, mais échouer proprement, sans appeler
+  // result_url.
+  it.each([
+    ["absent", { id: "job-1" }],
+    ["pas une chaîne", { id: "job-1", result_url: 42 }],
+    ["mal formée", { id: "job-1", result_url: "://pas-une-url" }],
+    ["hors domaine attendu", { id: "job-1", result_url: "https://evil.example.com/steal" }],
+    ["hors chemin attendu (mauvais préfixe)", { id: "job-1", result_url: "https://api.gladia.io/v1/other/job-1" }],
+  ])("result_url %s à l'init → AUDIO_UNREADABLE, non réessayable, aucun sondage", async (_label, initBody) => {
+    vi.stubEnv("GLADIA_API_KEY", "gk-test");
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonResponse(200, { audio_url: "https://api.gladia.io/files/abc" }))
+      .mockResolvedValueOnce(jsonResponse(201, initBody));
+
+    const provider = createGladiaProvider({ fetchImpl, sleep: noopSleep() });
+
+    await expect(
+      provider.transcribe({ audioUrl: AUDIO_URL, mimeType: "audio/webm" }),
+    ).rejects.toMatchObject({ code: "AUDIO_UNREADABLE", retryable: false });
+    // Upload + init seulement : jamais de 3e appel (le sondage) sur une
+    // result_url invalide.
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
 });
