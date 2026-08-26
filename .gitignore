@@ -15,9 +15,10 @@
 # production
 /build
 
-# env
-.env
-.env*.local
+# env — tout est ignoré (y compris .env.production, .env.development,
+# .env.test que Next.js charge aussi) sauf le gabarit committé volontairement
+.env*
+!.env.example
 
 # vercel
 .vercel
