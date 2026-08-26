@@ -102,24 +102,31 @@ export default function RecorderScreen(props: RecorderScreenProps) {
         clearActiveRecordingMarker();
         return;
       }
+      // Priorité absolue à cette garde, AVANT tout traitement destructeur
+      // (voir S3 ci-dessous) : un marqueur frais d'un AUTRE onglet doit
+      // court-circuiter toute action, y compris la suppression de coquille
+      // vide. Sans cette priorité, un onglet qui vient de démarrer un
+      // enregistrement — donc sans le moindre segment fermé pendant ses
+      // cinq premières minutes, la durée d'un cycle — se ferait voir comme
+      // une coquille vide et supprimer par n'importe quel autre onglet
+      // monté entre-temps : perte totale de l'audio en cours, pire que la
+      // collision de `seq` que ce marqueur visait justement à éviter (B4).
+      // Un marqueur périmé (onglet mort) ou posé par CET onglet (refresh du
+      // même onglet, cas nominal) retombe dans les cas normaux ci-dessous.
+      if (!isOwnMarker(marker) && !isMarkerStale(marker)) {
+        setRecordingElsewhere({ noteId: note.id, createdAt: note.createdAt });
+        return;
+      }
       if (segments.length === 0) {
         // Crash avant le moindre segment fermé (S3) : il n'y a rien à
         // reprendre, et un bandeau qui proposerait de récupérer le néant
         // serait pire que pas de bandeau. On supprime silencieusement
         // plutôt que de laisser une coquille vide traîner dans le store —
         // elle apparaîtrait sinon indéfiniment dans la future liste de notes.
+        // Atteint seulement pour un marqueur périmé ou propre à cet onglet :
+        // jamais pour un autre onglet encore vivant (garde ci-dessus).
         clearActiveRecordingMarker();
         await store.deleteNote(note.id).catch(() => {});
-        return;
-      }
-      if (!isOwnMarker(marker) && !isMarkerStale(marker)) {
-        // Un AUTRE onglet tient cette note et son heartbeat est encore
-        // frais : ne jamais proposer de la reprendre ici. Deux moteurs
-        // démarrés en parallèle sur la même note produiraient des `seq`
-        // dupliqués et écraseraient un segment dans Vercel Blob (B4). Un
-        // marqueur périmé (onglet mort) ou posé par CET onglet (refresh du
-        // même onglet, cas nominal) retombe dans le cas normal ci-dessous.
-        setRecordingElsewhere({ noteId: note.id, createdAt: note.createdAt });
         return;
       }
       setInterruptedNote({

@@ -395,6 +395,34 @@ describe("RecorderScreen", () => {
     expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
   });
 
+  it("B4/S3 — un marqueur frais d'un autre onglet protège aussi une note SANS AUCUN SEGMENT (régression)", async () => {
+    // Le piège précis qui a régressé : un onglet qui vient de démarrer n'a
+    // aucun segment fermé pendant ses cinq premières minutes (la durée d'un
+    // cycle). Si la garde multi-onglets était évaluée APRÈS la suppression
+    // de coquille vide (S3), cette note fraîchement démarrée dans l'onglet A
+    // serait vue comme une coquille vide par l'onglet B et supprimée —
+    // détruisant tout l'audio en cours d'enregistrement dans A. La garde
+    // "autre onglet" doit donc être évaluée EN PREMIER, avant toute
+    // suppression, quel que soit le nombre de segments.
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    // Aucun appendSegment : exactement la situation d'un enregistrement tout
+    // juste démarré ailleurs, avant la fermeture de son premier segment.
+    writeForeignMarker(note.id, 0); // heartbeat qui vient d'avoir lieu : onglet A manifestement vivant.
+    const deleteSpy = vi.spyOn(store, "deleteNote");
+
+    render(<RecorderScreen store={store} wakeLock={createWorkingWakeLock()} documentRef={fakeDocument} />);
+
+    expect(await screen.findByText(/autre onglet/i)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /reprendre l'enregistrement/i })).not.toBeInTheDocument();
+
+    // L'assertion qui compte vraiment : la note doit toujours exister, pas
+    // seulement "un bandeau s'affiche quelque part".
+    expect(deleteSpy).not.toHaveBeenCalled();
+    expect(await store.getNote(note.id)).toBeDefined();
+    expect(await store.listNotes()).toHaveLength(1);
+  });
+
   it("B4 — un marqueur périmé d'un autre onglet (mort) redevient reprenable normalement", async () => {
     const store = createFakeNoteStore();
     const note = await store.createNote({ lang: "fr" });
