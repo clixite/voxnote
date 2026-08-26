@@ -1,16 +1,17 @@
 import type { Page } from "@playwright/test";
 
 /**
- * Nom de base et schéma mirroir de `src/lib/store/indexeddb.ts`. Dupliqué ici
- * volontairement : `page.evaluate` ne peut sérialiser que la fonction qu'on
- * lui passe (pas d'import de code applicatif dans le contexte de la page), et
- * lire l'IndexedDB réelle du navigateur — plutôt que de faire confiance à ce
- * que `RecorderScreen` affiche — est le seul moyen de prouver la persistance
- * (voir le ticket P2-5). Si le schéma de `indexeddb.ts` change, ce fichier
- * doit être mis à jour en conséquence.
+ * Nom de la base applicative (`src/lib/store/indexeddb.ts`). Ce helper est un
+ * simple OBSERVATEUR en lecture : il ne connaît et n'impose aucun numéro de
+ * version de schéma — la version évolue avec les migrations (voir
+ * `NOTES_DB_VERSION`, déjà passé à 2 pour l'index unique `(noteId, seq)` du
+ * BLOQUANT B4), et un helper qui coderait un numéro en dur casserait à
+ * chaque migration future, comme celui-ci l'a fait une première fois.
+ * `readDbSnapshot` n'assume que le contrat public stable (noms des stores et
+ * des champs, voir `src/types/notes.ts`), jamais la structure interne
+ * (index, keyPath) ni le numéro de version.
  */
 const DB_NAME = "voxnote";
-const DB_VERSION = 1;
 
 /**
  * Supprime entièrement la base IndexedDB de l'app et vide le localStorage
@@ -68,42 +69,57 @@ export interface DbSnapshot {
  * d'`idb` ni du code applicatif) : la seule preuve réelle de persistance,
  * par opposition à une simple lecture de ce que l'écran affiche.
  *
- * Ouvre avec le même nom/version que l'application. Si la base n'existe pas
- * encore (aucun enregistrement démarré dans ce test), la création à la volée
- * ci-dessous reproduit le schéma de `indexeddb.ts` — nécessaire pour ne
- * jamais heurter une base sans object stores, ce qui empêcherait
- * durablement l'application de fonctionner dans la suite du test (une base
- * ouverte une fois en version 1 sans upgrade ultérieur ne re-déclenche
- * jamais `onupgradeneeded`).
+ * Ouvre SANS préciser de version (`indexedDB.open(dbName)`) : ça connecte à
+ * la version courante, quelle qu'elle soit, sans jamais déclencher
+ * `onupgradeneeded` sur une base qui existe déjà. Coder un numéro de
+ * version en dur ici serait faux dès la prochaine migration applicative
+ * (déjà arrivé une fois : la version est passée à 2 pendant que ce fichier
+ * en attendait 1, `VersionError` immédiat).
+ *
+ * Si la base n'existe pas encore (aucun enregistrement démarré dans ce
+ * test), on renvoie un instantané vide SANS jamais appeler `indexedDB.open`
+ * dessus : l'ouvrir la créerait avec un numéro de version, ce qui
+ * empêcherait ensuite l'application elle-même de la considérer comme
+ * nouvelle et d'exécuter sa vraie migration (`onupgradeneeded` ne se
+ * redéclenche que si la version demandée augmente par rapport à l'existant).
+ * `indexedDB.databases()` permet de vérifier l'existence sans effet de bord.
  */
 export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
-  return page.evaluate(async ({ dbName, dbVersion }): Promise<DbSnapshot> => {
+  return page.evaluate(async (dbName): Promise<DbSnapshot> => {
+    const empty: DbSnapshot = { notes: [], segments: [] };
+
+    if (typeof indexedDB.databases === "function") {
+      const existing = await indexedDB.databases();
+      if (!existing.some((entry) => entry.name === dbName)) {
+        return empty;
+      }
+    }
+
     const db = await new Promise<IDBDatabase>((resolve, reject) => {
-      const req = indexedDB.open(dbName, dbVersion);
+      const req = indexedDB.open(dbName);
       req.onupgradeneeded = () => {
-        const database = req.result;
-        if (!database.objectStoreNames.contains("notes")) {
-          const notes = database.createObjectStore("notes", { keyPath: "id" });
-          notes.createIndex("by-createdAt", "createdAt");
-        }
-        if (!database.objectStoreNames.contains("segments")) {
-          const segments = database.createObjectStore("segments", { keyPath: "id" });
-          segments.createIndex("by-noteId", "noteId");
-          segments.createIndex("by-status", "status");
-        }
-        if (!database.objectStoreNames.contains("transcripts")) {
-          const transcripts = database.createObjectStore("transcripts", {
-            keyPath: ["noteId", "seq"],
-          });
-          transcripts.createIndex("by-noteId", "noteId");
-        }
+        // Ne devrait jamais se produire : soit `databases()` a confirmé que
+        // la base existe déjà, soit `open()` sans version se contente de
+        // connecter à l'existant. Si ça arrive quand même (navigateur sans
+        // `databases()`, ou base réellement absente), mieux vaut échouer
+        // explicitement que fabriquer un schéma qui ne correspond pas
+        // forcément à celui, réel, de l'application.
+        req.transaction?.abort();
       };
       req.onsuccess = () => resolve(req.result);
       req.onerror = () => reject(req.error as DOMException);
+      req.onblocked = () => reject(new Error("Ouverture IndexedDB bloquée par une autre connexion."));
     });
 
     function getAll<T>(storeName: string): Promise<T[]> {
       return new Promise((resolve, reject) => {
+        // Store absent : dégradation explicite en liste vide, jamais un
+        // crash — une future migration pourrait renommer/réorganiser sans
+        // que ce helper ait à le prévoir.
+        if (!db.objectStoreNames.contains(storeName)) {
+          resolve([]);
+          return;
+        }
         const tx = db.transaction(storeName, "readonly");
         const request = tx.objectStore(storeName).getAll();
         request.onsuccess = () => resolve(request.result as T[]);
@@ -153,5 +169,5 @@ export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
         }))
         .sort((a, b) => a.seq - b.seq),
     };
-  }, { dbName: DB_NAME, dbVersion: DB_VERSION });
+  }, DB_NAME);
 }
