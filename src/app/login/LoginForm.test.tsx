@@ -3,10 +3,11 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import LoginForm from "./LoginForm";
 
 const pushMock = vi.fn();
+const refreshMock = vi.fn();
 let searchParamsValue = new URLSearchParams();
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: pushMock }),
+  useRouter: () => ({ push: pushMock, refresh: refreshMock }),
   useSearchParams: () => searchParamsValue,
 }));
 
@@ -30,11 +31,12 @@ function submit() {
 describe("LoginForm", () => {
   beforeEach(() => {
     pushMock.mockClear();
+    refreshMock.mockClear();
     searchParamsValue = new URLSearchParams();
     vi.stubGlobal("fetch", vi.fn());
   });
 
-  it("redirige vers / après une connexion réussie sans destination demandée", async () => {
+  it("redirige vers / et rafraîchit le router après une connexion réussie sans destination demandée", async () => {
     vi.mocked(fetch).mockResolvedValueOnce(mockFetchResponse(204));
     render(<LoginForm />);
 
@@ -42,6 +44,7 @@ describe("LoginForm", () => {
     submit();
 
     await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
+    expect(refreshMock).toHaveBeenCalledTimes(1);
   });
 
   it("redirige vers la page initialement demandée (from) après succès", async () => {
@@ -57,6 +60,19 @@ describe("LoginForm", () => {
 
   it("ignore une valeur from protocole-relative et redirige vers / (anti open-redirect)", async () => {
     searchParamsValue = new URLSearchParams({ from: "//evil.example" });
+    vi.mocked(fetch).mockResolvedValueOnce(mockFetchResponse(204));
+    render(<LoginForm />);
+
+    typePassword("secret");
+    submit();
+
+    await waitFor(() => expect(pushMock).toHaveBeenCalledWith("/"));
+  });
+
+  it("ignore une valeur from en /\\ (contournement navigateur connu) et redirige vers /", async () => {
+    // Les navigateurs normalisent l'antislash en double slash : "/\evil.example"
+    // équivaut à "//evil.example" et doit être rejeté au même titre.
+    searchParamsValue = new URLSearchParams({ from: "/\\evil.example" });
     vi.mocked(fetch).mockResolvedValueOnce(mockFetchResponse(204));
     render(<LoginForm />);
 

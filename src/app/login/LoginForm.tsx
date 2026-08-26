@@ -3,22 +3,12 @@
 import { useState, type FormEvent } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 
+import { sanitizeRedirectPath } from "@/lib/auth/redirect";
+
 const NETWORK_ERROR_MESSAGE =
   "Connexion impossible. Vérifie ta connexion internet.";
 const GENERIC_ERROR_MESSAGE =
   "Une erreur est survenue. Réessaie dans quelques instants.";
-
-/**
- * N'accepte qu'une redirection interne relative (ex. "/notes/42").
- * Rejette les URLs protocole-relatives ("//site.example") qui
- * enverraient l'utilisateur hors de l'application.
- */
-function sanitizeRedirect(from: string | null): string {
-  if (from && from.startsWith("/") && !from.startsWith("//")) {
-    return from;
-  }
-  return "/";
-}
 
 export default function LoginForm() {
   const router = useRouter();
@@ -40,8 +30,15 @@ export default function LoginForm() {
       });
 
       if (response.status === 204) {
-        const destination = sanitizeRedirect(searchParams.get("from"));
+        const destination = sanitizeRedirectPath(searchParams.get("from"));
         router.push(destination);
+        // Le cookie de session vient d'être posé par le serveur : sans ce
+        // refresh, une destination déjà présente dans le Router Cache
+        // client (ex. prefetch d'un lien visité pendant que la session
+        // était absente) pourrait être resservie telle quelle. On force
+        // l'invalidation pour que les Server Components de la destination
+        // se re-rendent avec la session désormais active.
+        router.refresh();
         return;
       }
 
