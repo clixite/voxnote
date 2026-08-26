@@ -36,13 +36,14 @@
  * `runItem` — insuffisant : l'événement `online` réveille TOUS les onglets
  * EN MÊME TEMPS après une coupure, donc tous lisent « libre » avant qu'aucun
  * n'ait écrit. Démontré en revue : 6 transcriptions facturées pour 3
- * segments, de façon déterministe. Le filtrage optimiste de
- * `collectQueueItems` reste en place (il évite des tentatives de réservation
- * inutiles), mais ce n'est plus lui qui décide : `store.claimSegment`
- * réserve dans une seule transaction IndexedDB (voir `src/types/notes.ts`),
- * ce qu'IndexedDB sérialise par construction sur un même object store —
- * c'est la primitive d'exclusion mutuelle qui manquait. Seul un `claimSegment`
- * qui renvoie `true` fait entrer un segment dans le lot traité (`runTick`).
+ * segments, de façon déterministe. Le tri optimiste par réservation vit
+ * maintenant dans `runTick`, sur la SÉLECTION des candidats à réserver (il
+ * évite des appels `claimSegment` inutiles) — mais ce n'est plus lui qui
+ * décide : `store.claimSegment` réserve dans une seule transaction
+ * IndexedDB (voir `src/types/notes.ts`), ce qu'IndexedDB sérialise par
+ * construction sur un même object store — c'est la primitive d'exclusion
+ * mutuelle qui manquait. Seul un `claimSegment` qui renvoie `true` fait
+ * entrer un segment dans le lot traité.
  *
  * La réservation est rafraîchie pendant tout traitement effectif
  * (`withClaimHeartbeat`, en réutilisant `claimSegment` lui-même — voir son
@@ -53,6 +54,14 @@
  * l'autre — contournant le plafond de tentatives à deux onglets (deuxième
  * défaut démontré par la même sonde). Voir l'argumentaire complet en tête de
  * `handleFailure`.
+ *
+ * Troisième défaut, même sonde (comptage) : `collectQueueItems` NE FILTRE
+ * PAS par réservation (voir son commentaire de tête) — un segment réservé
+ * par un autre onglet est en attente, pas terminé, et doit compter comme
+ * tel dans `pendingCountCache`/`globalStatus`. Le filtre optimiste
+ * n'intervient que dans `runTick`, sur la sélection des candidats à
+ * réserver : compter et sélectionner sont deux besoins différents, qui ne
+ * doivent plus jamais partager le même filtre.
  */
 import {
   HEARTBEAT_INTERVAL_MS,
@@ -76,6 +85,13 @@ export interface QueueSegmentContext {
   blobUrl?: string;
   /** Tentatives d'upload déjà effectuées pour ce segment (`Segment.attempts`). */
   attempts: number;
+  /**
+   * Réservation lue au moment de la collecte (`collectQueueItems`), pour le
+   * tri optimiste de `runTick` — voir `isSegmentClaimAvailable`. Un
+   * instantané, jamais réévalué : seul `store.claimSegment` fait foi.
+   */
+  claimedBy?: string;
+  claimedAt?: number;
 }
 
 export type UploadSegmentFn = (ctx: QueueSegmentContext) => Promise<string>;
@@ -202,30 +218,29 @@ function toContext(segment: Segment, note: Note): QueueSegmentContext {
     lang: note.lang,
     blobUrl: segment.blobUrl,
     attempts: segment.attempts,
+    claimedBy: segment.claimedBy,
+    claimedAt: segment.claimedAt,
   };
 }
 
 /**
- * Reconstruit la liste des segments à traiter, uniquement depuis le
+ * Reconstruit la liste de TOUS les segments en attente, uniquement depuis le
  * `NoteStore` — jamais depuis un état parallèle. Union de deux lectures :
  * `listPendingSegments()` (upload : `local`/`uploading`/`error`, quelle que
  * soit l'étape où l'erreur est survenue — voir le commentaire de tête) et un
  * balayage des notes pour les segments `uploaded`/`transcribing` que
  * `listPendingSegments()` ne couvre pas par contrat.
  *
- * `tabId` filtre au passage les segments réservés par un AUTRE onglet et
- * dont la réservation est encore fraîche (B2, voir `isSegmentClaimAvailable`)
- * : ils n'apparaissent tout simplement pas dans le résultat. Ce filtre est
- * OPTIMISTE, pas décisionnel (voir le commentaire de tête de `runTick`) :
- * il évite d'essayer de réserver des segments visiblement déjà pris, mais
- * seul `store.claimSegment` — appelé ensuite, atomiquement — décide qui
- * obtient réellement un segment.
+ * NON FILTRÉ par réservation, délibérément (revue, comptage inter-onglets) :
+ * un segment réservé par un AUTRE onglet est bel et bien en attente — il
+ * n'est pas terminé, juste traité ailleurs. `runTick` s'en sert pour DEUX
+ * besoins différents qui doivent rester distincts : `pendingCountCache`
+ * (compte affiché, TOUJOURS sur cette liste complète) et la sélection des
+ * candidats à réserver (sur un sous-ensemble filtré séparément — voir
+ * `isSegmentClaimAvailable` et le commentaire de tête de `runTick`). Un
+ * filtre appliqué ICI mentirait sur le premier pour servir le second.
  */
-export async function collectQueueItems(
-  store: NoteStore,
-  tabId: string,
-  now: number = Date.now(),
-): Promise<QueueSegmentContext[]> {
+export async function collectQueueItems(store: NoteStore): Promise<QueueSegmentContext[]> {
   const notes = await store.listNotes();
   const noteById = new Map(notes.map((note) => [note.id, note] as const));
 
@@ -237,7 +252,6 @@ export async function collectQueueItems(
     const note = noteById.get(segment.noteId);
     if (!note) continue; // Note supprimée entre-temps : segment orphelin, ignoré.
     seen.add(segment.id);
-    if (!isSegmentClaimAvailable(segment, tabId, now)) continue;
     items.push(toContext(segment, note));
   }
 
@@ -247,7 +261,6 @@ export async function collectQueueItems(
       if (seen.has(segment.id)) continue;
       if (segment.status === "uploaded" || segment.status === "transcribing") {
         seen.add(segment.id);
-        if (!isSegmentClaimAvailable(segment, tabId, now)) continue;
         items.push(toContext(segment, note));
       }
     }
@@ -409,18 +422,34 @@ export class UploadQueue {
    * compromis délibéré, sans incidence sur la garantie « zéro perte » ni sur
    * le plafond de concurrence lui-même, qui reste strictement respecté.
    *
-   * Réservation (B2, deuxième passe de revue) : `collectQueueItems` ne fait
-   * qu'un premier tri OPTIMISTE — il évite d'essayer de réserver des
-   * segments visiblement déjà pris, mais son verdict n'est jamais celui qui
-   * décide. Entre cette lecture et l'écriture de réservation, une fenêtre
-   * existe (`listNotes` + `listPendingSegments` + un `listSegments` par
-   * note) — pas quelques microsecondes : la durée d'une passe complète.
-   * L'événement `online` réveille TOUS les onglets en même temps après une
-   * coupure ; sans verrou, chacun lirait « libre » avant qu'aucun n'ait
-   * écrit (démontré en revue : 6 transcriptions pour 3 segments). Seul
+   * Réservation (B2, deux passes de revue) : `collectQueueItems` renvoie
+   * TOUS les segments en attente, sans filtre (voir son commentaire de tête)
+   * — `pendingCountCache` en dérive directement, pour un compte affiché
+   * correct même quand des segments sont réservés par un autre onglet.
+   * `isSegmentClaimAvailable` n'intervient qu'ICI, sur la sélection des
+   * candidats à réserver, jamais sur le comptage : les deux besoins sont
+   * différents (troisième passe de revue — un onglet avec des segments
+   * réservés ailleurs affichait à tort « Terminé »).
+   *
+   * Ce tri reste OPTIMISTE — il évite d'essayer de réserver des segments
+   * visiblement déjà pris, mais son verdict n'est jamais celui qui décide.
+   * Entre la lecture et l'écriture de réservation, une fenêtre existe
+   * (`listNotes` + `listPendingSegments` + un `listSegments` par note) — pas
+   * quelques microsecondes : la durée d'une passe complète. L'événement
+   * `online` réveille TOUS les onglets en même temps après une coupure ;
+   * sans verrou, chacun lirait « libre » avant qu'aucun n'ait écrit
+   * (démontré en revue : 6 transcriptions pour 3 segments). Seul
    * `store.claimSegment` — une unique transaction IndexedDB, atomique par
    * construction — décide réellement : un candidat n'entre dans le lot
    * traité que si son appel a renvoyé `true`.
+   *
+   * Un « Réessayer » explicite (`forcedNow`) traverse ce tri optimiste sans
+   * y être soumis : la demande atteint toujours `store.claimSegment`, seul
+   * arbitre réel. Si un autre onglet tient encore la réservation, la
+   * tentative échoue proprement (rejouée au tick suivant) plutôt que d'être
+   * purgée en silence faute de candidat apparent — un bouton qui ne
+   * déclencherait parfois aucune tentative réelle serait pire qu'un bouton
+   * qui tente et perd occasionnellement la course.
    */
   private async runTick(): Promise<void> {
     for (;;) {
@@ -437,7 +466,7 @@ export class UploadQueue {
       // perte (voir ticket P3-5, « rassurer »).
       let items: QueueSegmentContext[];
       try {
-        items = await collectQueueItems(this.store, this.tabId, this.now());
+        items = await collectQueueItems(this.store);
       } catch {
         // Le NoteStore lui-même est momentanément inaccessible (IndexedDB pas
         // encore prête, panne ponctuelle...) : jamais de rejection non gérée
@@ -481,16 +510,31 @@ export class UploadQueue {
       let earliestWaitAt: number | undefined;
 
       for (const item of items) {
-        const dueAt = this.forcedNow.has(item.segmentId)
-          ? 0
-          : (this.retryState.get(item.segmentId)?.nextRetryAt ?? 0);
-        if (dueAt <= now) {
+        const forced = this.forcedNow.has(item.segmentId);
+        const dueAt = forced ? 0 : (this.retryState.get(item.segmentId)?.nextRetryAt ?? 0);
+        // Tri optimiste (voir le commentaire de tête de `collectQueueItems`) :
+        // un « Réessayer » explicite (`forced`) le court-circuite entièrement
+        // — l'utilisateur mérite une VRAIE tentative, décidée par le seul
+        // arbitre qui compte, `store.claimSegment` juste en dessous, jamais
+        // une demande purgée en silence faute de candidat apparent (revue).
+        // Sans `forced`, ce tri évite juste un appel `claimSegment` inutile
+        // sur un segment visiblement déjà pris par un autre onglet.
+        const optimisticallyClaimable = forced || isSegmentClaimAvailable(item, this.tabId, now);
+        if (dueAt <= now && optimisticallyClaimable) {
           ready.push(item);
-        } else if (dueAt !== STOPPED && (earliestWaitAt === undefined || dueAt < earliestWaitAt)) {
+        } else if (
+          !forced &&
+          optimisticallyClaimable &&
+          dueAt !== STOPPED &&
+          (earliestWaitAt === undefined || dueAt < earliestWaitAt)
+        ) {
           // STOPPED (échec définitif) n'est jamais reprogrammé tout seul : un
           // setTimeout(±Infinity) déborderait le délai 32 bits et pourrait se
           // déclencher immédiatement selon le runtime, provoquant la boucle
-          // serrée que ce sentinel existe justement pour éviter.
+          // serrée que ce sentinel existe justement pour éviter. Un segment
+          // réservé par un autre onglet n'est pas non plus reprogrammé ici :
+          // rien à espérer avant que sa réservation expire, et ce tab n'a pas
+          // à sonder activement pour ça (voir le commentaire de tête du fichier).
           earliestWaitAt = dueAt;
         }
       }

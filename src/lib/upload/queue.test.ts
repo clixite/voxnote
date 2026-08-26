@@ -94,7 +94,7 @@ describe("collectQueueItems", () => {
     });
     await store.updateSegment(done.id, { status: "done" });
 
-    const items = await collectQueueItems(store, "tab-test");
+    const items = await collectQueueItems(store);
     const ids = items.map((i) => i.segmentId).sort();
     expect(ids).toEqual([local.id, uploaded.id].sort());
     const uploadedItem = items.find((i) => i.segmentId === uploaded.id);
@@ -114,7 +114,7 @@ describe("collectQueueItems", () => {
     });
     await store.deleteNote(note.id);
 
-    const items = await collectQueueItems(store, "tab-test");
+    const items = await collectQueueItems(store);
     expect(items).toEqual([]);
   });
 });
@@ -648,6 +648,97 @@ describe("UploadQueue", () => {
       expect(uploadSegment).not.toHaveBeenCalled();
       const seg = await firstSegment(store, note.id);
       expect(seg.status).toBe("uploading");
+      expect(seg.claimedBy).toBe("tab-other");
+
+      // Le compteur ne doit JAMAIS mentir (revue) : un segment réservé
+      // ailleurs est en attente, pas terminé — badge "Terminé" à tort sinon.
+      const snapshot = queue.getSnapshot();
+      expect(snapshot.pendingCount).toBe(1);
+      expect(snapshot.globalStatus).not.toBe("idle");
+      expect(snapshot.globalStatus).toBe("syncing");
+    });
+
+    it("un segment réservé par un autre onglet compte comme en attente, jamais comme terminé, même seul dans la note", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 1,
+        blob: new Blob(["audio-2"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+      const segments = await store.listSegments(note.id);
+      for (const segment of segments) {
+        await store.updateSegment(segment.id, {
+          status: "uploading",
+          claimedBy: "tab-other",
+          claimedAt: Date.now(),
+        });
+      }
+
+      const queue = new UploadQueue({
+        store,
+        uploadSegment: immediateUpload(),
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-me",
+      });
+      await queue.start();
+
+      const snapshot = queue.getSnapshot();
+      expect(snapshot.pendingCount).toBe(2);
+      expect(snapshot.globalStatus).not.toBe("idle");
+    });
+
+    it("Réessayer un segment réservé par un autre onglet tente réellement une réservation, jamais une purge silencieuse", async () => {
+      const store = createMemoryNoteStore();
+      const note = await makeProcessingNote(store);
+      const segment = await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["audio"]),
+        mimeType: "audio/webm",
+        durationMs: 1000,
+      });
+      // Échec réessayable ailleurs : la réservation de tab-other reste
+      // fraîche (voir le test dédié plus haut), le segment est en "error".
+      await store.updateSegment(segment.id, {
+        status: "error",
+        error: "Panne réseau chez tab-other.",
+        claimedBy: "tab-other",
+        claimedAt: Date.now(),
+      });
+
+      const uploadSegment = immediateUpload();
+      const queue = new UploadQueue({
+        store,
+        uploadSegment,
+        transcribeSegment: immediateTranscribe(),
+        isOnline: () => true,
+        tabId: "tab-me",
+      });
+      await queue.start(); // rien à traiter (optimistiquement filtré, pas forcé) — mais démarre la file
+
+      const claimSpy = vi.spyOn(store, "claimSegment");
+      await queue.retrySegment(segment.id);
+
+      // L'essentiel : une VRAIE tentative a eu lieu (l'arbitre atomique a
+      // été consulté), jamais une demande purgée en silence faute de
+      // candidat apparent dans le tri optimiste.
+      expect(claimSpy).toHaveBeenCalledWith(segment.id, "tab-me", expect.any(Number));
+      // Elle perd légitimement la course : tab-other tient toujours la
+      // réservation fraîche, ce n'est pas un bug, c'est l'exclusion mutuelle
+      // qui fonctionne — voir l'argumentaire de tête de `runTick`.
+      expect(uploadSegment).not.toHaveBeenCalled();
+      const seg = await firstSegment(store, note.id);
       expect(seg.claimedBy).toBe("tab-other");
     });
 
