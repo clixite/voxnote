@@ -114,6 +114,13 @@ export interface NoteStore {
   /** Supprime la note ET ses segments ET ses transcripts, atomiquement. */
   deleteNote(id: string): Promise<void>;
 
+  /**
+   * Écrit un segment. Ne touche NI `Note.durationMs` NI `Note.status` : le
+   * stockage ne dérive rien. C'est l'appelant (le hook d'enregistrement, puis
+   * la queue d'upload) qui met la note à jour explicitement via `updateNote`.
+   * Une couche de persistance qui calcule des états métier devient impossible
+   * à raisonner dès qu'un second écrivain apparaît.
+   */
   appendSegment(input: AppendSegmentInput): Promise<Segment>;
   /** Triés par `seq` croissant. */
   listSegments(noteId: string): Promise<Segment[]>;
@@ -121,7 +128,15 @@ export interface NoteStore {
     id: string,
     patch: Partial<Omit<Segment, "id" | "noteId" | "seq">>,
   ): Promise<Segment>;
-  /** Tous les segments encore à uploader, toutes notes confondues, par ancienneté. */
+  /**
+   * Tous les segments encore à uploader, toutes notes confondues, par ancienneté.
+   *
+   * « En attente » couvre `local`, `uploading` ET `error`. Inclure `uploading`
+   * est délibéré : un segment laissé dans cet état est un upload interrompu par
+   * un refresh ou un crash, donc précisément ce que la queue doit reprendre.
+   * L'exclure créerait un trou permanent dans la note — l'inverse exact du
+   * critère « zéro perte » de la Phase 2.
+   */
   listPendingSegments(): Promise<Segment[]>;
 
   putTranscript(transcript: Transcript): Promise<void>;
