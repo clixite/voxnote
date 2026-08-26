@@ -34,6 +34,8 @@ résumés IA, diarisation, traduction, app native. Les notes restent local-first
 5. RGPD : supprimer une note supprime audio + texte ; purge auto des audios > 7 jours ;
    page confidentialité.
 6. Interface en français, messages d'erreur compréhensibles par un non-technicien.
+   **Tutoiement partout**, sans exception : écrans, messages d'erreur, page de
+   confidentialité, documentation. C'est une app personnelle, pas un contrat.
 7. Aucune page ni route API accessible sans session valide, hors `/login`,
    `/confidentialite`, les assets et le cron. Aucun secret n'a de valeur par défaut :
    `AUTH_SECRET` ou `APP_PASSWORD_HASH` manquant = échec explicite au démarrage.
