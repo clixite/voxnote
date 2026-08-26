@@ -7,6 +7,7 @@ import type {
   Transcript,
 } from "@/types/notes";
 
+import { canClaimSegment } from "./claim";
 import {
   DuplicateSegmentSeqError,
   NoteNotFoundError,
@@ -200,6 +201,38 @@ export function createMemoryNoteStore(
         .filter((segment) => isPendingUploadStatus(segment.status))
         .sort((a, b) => a.insertedAt - b.insertedAt)
         .map(toPublicSegment);
+    },
+
+    async claimSegment(
+      segmentId: string,
+      tabId: string,
+      staleBefore: number,
+    ): Promise<boolean> {
+      // Pas de transaction ici : une `Map` est mutée de façon synchrone, donc
+      // aucun autre appel ne peut s'intercaler entre la lecture et
+      // l'écriture — l'atomicité est triviale. Ce qui compte est de rester
+      // observablement identique à `indexeddb.ts` (voir `canClaimSegment`,
+      // partagé), pas de reproduire sa mécanique de transaction.
+      const segment = segments.get(segmentId);
+      if (!segment || !canClaimSegment(segment, tabId, staleBefore)) {
+        return false;
+      }
+      segments.set(segmentId, {
+        ...segment,
+        claimedBy: tabId,
+        claimedAt: Date.now(),
+      });
+      return true;
+    },
+
+    async releaseSegment(segmentId: string, tabId: string): Promise<void> {
+      const segment = segments.get(segmentId);
+      if (segment && segment.claimedBy === tabId) {
+        const released: StoredSegment = { ...segment };
+        delete released.claimedBy;
+        delete released.claimedAt;
+        segments.set(segmentId, released);
+      }
     },
 
     async putTranscript(transcript: Transcript): Promise<void> {

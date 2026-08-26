@@ -15,6 +15,7 @@ import type {
   Transcript,
 } from "@/types/notes";
 
+import { canClaimSegment } from "./claim";
 import {
   DuplicateSegmentSeqError,
   NoteNotFoundError,
@@ -283,6 +284,48 @@ export function createIndexedDbNoteStore(
         .flat()
         .sort((a, b) => a.insertedAt - b.insertedAt)
         .map(toPublicSegment);
+    },
+
+    async claimSegment(
+      segmentId: string,
+      tabId: string,
+      staleBefore: number,
+    ): Promise<boolean> {
+      const db = await getDb();
+      // Une seule transaction en écriture pour toute la séquence
+      // lecture-test-écriture : c'est ce qu'IndexedDB sérialise par
+      // construction sur un même object store. Deux appels concurrents sur
+      // ce même segment ouvrent chacun leur transaction, mais IndexedDB les
+      // exécute l'une après l'autre — jamais les deux à la fois — donc la
+      // seconde voit forcément l'écriture de la première avant de lire.
+      const tx = db.transaction("segments", "readwrite");
+      const store = tx.objectStore("segments");
+      const segment = await store.get(segmentId);
+
+      let claimed = false;
+      if (segment && canClaimSegment(segment, tabId, staleBefore)) {
+        await store.put({ ...segment, claimedBy: tabId, claimedAt: Date.now() });
+        claimed = true;
+      }
+
+      await tx.done;
+      return claimed;
+    },
+
+    async releaseSegment(segmentId: string, tabId: string): Promise<void> {
+      const db = await getDb();
+      const tx = db.transaction("segments", "readwrite");
+      const store = tx.objectStore("segments");
+      const segment = await store.get(segmentId);
+
+      if (segment && segment.claimedBy === tabId) {
+        const released: StoredSegment = { ...segment };
+        delete released.claimedBy;
+        delete released.claimedAt;
+        await store.put(released);
+      }
+
+      await tx.done;
     },
 
     async putTranscript(transcript: Transcript): Promise<void> {

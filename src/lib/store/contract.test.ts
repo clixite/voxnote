@@ -359,4 +359,166 @@ describe.each(implementations)("NoteStore — %s", (_name, createStore) => {
     const transcripts = await store.listTranscripts(note.id);
     expect(transcripts.map((t) => t.text)).toEqual(["première", "deuxième"]);
   });
+
+  it("claimSegment sur un segment inexistant renvoie false", async () => {
+    const store = createStore();
+    await expect(store.claimSegment("absent", "tab-a", 0)).resolves.toBe(
+      false,
+    );
+  });
+
+  it("claimSegment réserve un segment libre", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await expect(
+      store.claimSegment(segment.id, "tab-a", Date.now()),
+    ).resolves.toBe(true);
+  });
+
+  it("claimSegment est idempotent pour l'onglet qui possède déjà la réservation", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await store.claimSegment(segment.id, "tab-a", Date.now());
+    await expect(
+      store.claimSegment(segment.id, "tab-a", Date.now()),
+    ).resolves.toBe(true);
+  });
+
+  // Lit le `claimedAt` réellement persisté plutôt que d'utiliser l'horodatage
+  // capturé côté test : l'implémentation pose le sien via son propre
+  // `Date.now()`, après un aller-retour asynchrone (voire une vraie
+  // transaction IndexedDB) — s'y fier à ±1ms près serait un test flaky.
+  async function claimedAtOf(
+    store: NoteStore,
+    noteId: string,
+    segmentId: string,
+  ): Promise<number> {
+    const segments = await store.listSegments(noteId);
+    const segment = segments.find((s) => s.id === segmentId);
+    return segment!.claimedAt!;
+  }
+
+  it("claimSegment refuse une réservation fraîche d'un autre onglet", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await store.claimSegment(segment.id, "tab-a", Date.now());
+    const claimedAt = await claimedAtOf(store, note.id, segment.id);
+
+    // staleBefore == claimedAt : pas strictement antérieur, donc pas périmée.
+    await expect(
+      store.claimSegment(segment.id, "tab-b", claimedAt),
+    ).resolves.toBe(false);
+  });
+
+  it("claimSegment reprend une réservation périmée pour un autre onglet", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await store.claimSegment(segment.id, "tab-a", Date.now());
+    const claimedAt = await claimedAtOf(store, note.id, segment.id);
+
+    // staleBefore strictement postérieur à claimedAt : la réservation de
+    // tab-a est périmée.
+    await expect(
+      store.claimSegment(segment.id, "tab-b", claimedAt + 1),
+    ).resolves.toBe(true);
+  });
+
+  it("releaseSegment par le mauvais onglet ne libère rien", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await store.claimSegment(segment.id, "tab-a", Date.now());
+    const claimedAt = await claimedAtOf(store, note.id, segment.id);
+    await store.releaseSegment(segment.id, "tab-b");
+
+    // Toujours réservé par tab-a : une réservation fraîche d'un autre onglet
+    // reste refusée après la tentative de libération illégitime.
+    await expect(
+      store.claimSegment(segment.id, "tab-b", claimedAt),
+    ).resolves.toBe(false);
+  });
+
+  it("releaseSegment par le bon onglet libère la réservation immédiatement", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    await store.claimSegment(segment.id, "tab-a", Date.now());
+    await store.releaseSegment(segment.id, "tab-a");
+
+    // Libre : même un staleBefore à 0 (donc "aucune réservation n'est
+    // périmée") ne doit pas bloquer, puisqu'il n'y a plus de réservation
+    // du tout — « libre » l'emporte sur « périmée ».
+    await expect(store.claimSegment(segment.id, "tab-b", 0)).resolves.toBe(
+      true,
+    );
+  });
+
+  it("deux claimSegment concurrents sur le même segment : une seule réservation aboutit", async () => {
+    const store = createStore();
+    const note = await store.createNote({ lang: "fr" });
+    const segment = await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    // Aucun `await` entre les deux appels : sur l'implémentation IndexedDB,
+    // les deux transactions s'ouvrent réellement en parallèle — c'est
+    // exactement le scénario de l'événement `online` délivré simultanément à
+    // tous les onglets qui a produit six transcriptions pour trois segments.
+    const [claimA, claimB] = await Promise.all([
+      store.claimSegment(segment.id, "tab-a", Date.now()),
+      store.claimSegment(segment.id, "tab-b", Date.now()),
+    ]);
+
+    expect([claimA, claimB].filter(Boolean)).toHaveLength(1);
+  });
 });
