@@ -38,6 +38,20 @@ Changement du mot de passe = redéploiement. Procédure :
 
 Aucune table de sessions à gérer — c'est la "révocation du pauvre", suffisante pour un cercle de confiance.
 
+### Jeu d'essai pour les tests (CI et Playwright)
+
+`playwright.config.ts` (bloc `webServer.env`) et `.github/workflows/ci.yml` (les deux jobs)
+committent des valeurs de test **publiques**, volontairement fictives — ce ne sont pas des
+secrets, elles n'ont aucune valeur en production :
+
+| Variable | Valeur de test | Remarque |
+|---|---|---|
+| Mot de passe en clair | `phrase-de-passe-de-test-voxnote` | Utilisé par les e2e de connexion |
+| `APP_PASSWORD_HASH` | hash bcrypt réel de la phrase ci-dessus | Généré avec `pnpm hash-password` |
+| `AUTH_SECRET` | `voxnote-public-ci-test-secret-do-not-use-in-prod` | 48 caractères, manifestement factice |
+
+Ces valeurs ne doivent jamais être réutilisées pour un déploiement réel.
+
 ## Configuration par fournisseur de transcription
 
 ### Groq (défaut, recommandé)

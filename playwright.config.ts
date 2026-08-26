@@ -34,9 +34,15 @@ export default defineConfig({
     timeout: 180_000,
     env: {
       PORT: String(PORT),
-      AUTH_SECRET: process.env.AUTH_SECRET ?? "ci-dummy-secret-for-build-only",
+      // Valeurs de test PUBLIQUES (committées volontairement) : le mot de
+      // passe en clair correspondant est `phrase-de-passe-de-test-voxnote`,
+      // utilisé par les e2e de connexion. Aucune valeur réelle ici.
+      AUTH_SECRET:
+        process.env.AUTH_SECRET ??
+        "voxnote-public-ci-test-secret-do-not-use-in-prod",
       APP_PASSWORD_HASH:
-        process.env.APP_PASSWORD_HASH ?? "ci-dummy-hash-for-build-only",
+        process.env.APP_PASSWORD_HASH ??
+        "$2b$10$UTeiF0JzNamfFO7B6k4ENeL6CTnKPPOJ4OiZKrjictv.0IDUmt6Yq",
     },
   },
 });
