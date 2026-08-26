@@ -63,6 +63,47 @@ describe("toRecorderError", () => {
       expect(messageFor(code).length).toBeGreaterThan(0);
     }
   });
+
+  it("tutoie systématiquement : aucun message ne vouvoie (CLAUDE.md #6, sans exception)", () => {
+    const codes = [
+      "permission-denied",
+      "no-microphone",
+      "microphone-busy",
+      "unsupported-constraints",
+      "insecure-context",
+      "aborted",
+      "no-supported-mime-type",
+      "max-duration-reached",
+      "note-not-found",
+      "unknown",
+    ] as const;
+    for (const code of codes) {
+      expect(messageFor(code)).not.toMatch(/\b(vous|votre|vos)\b/i);
+    }
+  });
+
+  it("chaque message dit quoi faire, pas seulement ce qui a échoué", () => {
+    // Un verbe à l'impératif (2e pers. du singulier) ou une consigne
+    // explicite : la preuve qu'il reste une action à faire, pas seulement un
+    // constat d'échec.
+    const actionPattern =
+      /réessaie|autorise|ferme|branche|démarre|essaie|ouvre|utilise|redémarre|vérifie/i;
+    const codes = [
+      "permission-denied",
+      "no-microphone",
+      "microphone-busy",
+      "unsupported-constraints",
+      "insecure-context",
+      "aborted",
+      "no-supported-mime-type",
+      "max-duration-reached",
+      "note-not-found",
+      "unknown",
+    ] as const;
+    for (const code of codes) {
+      expect(messageFor(code)).toMatch(actionPattern);
+    }
+  });
 });
 
 describe("erreurs dédiées", () => {

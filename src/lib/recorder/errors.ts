@@ -1,7 +1,9 @@
 /**
  * Traduction des erreurs de capture audio en messages français exploitables
  * par un non-technicien (CLAUDE.md #6 et #7 du ticket) : jamais un
- * `NotAllowedError` brut affiché à l'écran.
+ * `NotAllowedError` brut affiché à l'écran. Tutoiement partout, sans
+ * exception (CLAUDE.md #6) — et chaque message dit non seulement ce qui a
+ * échoué, mais ce qu'il y a à faire ensuite.
  */
 export type RecorderErrorCode =
   | "permission-denied"
@@ -27,21 +29,24 @@ export class RecorderError extends Error {
 
 const MESSAGES: Record<RecorderErrorCode, string> = {
   "permission-denied":
-    "Accès au microphone refusé. Autorisez le microphone pour ce site dans les réglages de votre navigateur, puis réessayez.",
-  "no-microphone": "Aucun microphone n'a été détecté sur cet appareil.",
+    "Accès au microphone refusé. Autorise le microphone pour VoxNote dans les réglages de ton navigateur, puis réessaie.",
+  "no-microphone":
+    "Aucun microphone n'a été détecté sur cet appareil. Branches-en un ou vérifie son branchement, puis réessaie.",
   "microphone-busy":
-    "Le microphone est déjà utilisé par une autre application. Fermez-la, puis réessayez.",
-  "unsupported-constraints": "Ce microphone n'est pas compatible avec l'enregistrement.",
+    "Le microphone est déjà utilisé par une autre application. Ferme-la, puis réessaie.",
+  "unsupported-constraints":
+    "Ce microphone n'est pas compatible avec l'enregistrement. Essaie avec un autre microphone si tu en as un.",
   "insecure-context":
-    "L'accès au microphone est bloqué car la connexion n'est pas sécurisée. Ouvrez VoxNote en HTTPS.",
-  aborted: "L'accès au microphone a été interrompu. Réessayez.",
+    "L'accès au microphone est bloqué : la connexion n'est pas sécurisée. Ouvre VoxNote via une adresse commençant par https://, puis réessaie.",
+  aborted: "L'accès au microphone a été interrompu. Réessaie.",
   "no-supported-mime-type":
-    "Ce navigateur ne permet pas d'enregistrer de l'audio ici. Essayez avec une version à jour de Chrome, Safari ou Firefox.",
+    "Ce navigateur ne permet pas d'enregistrer de l'audio ici. Essaie avec une version à jour de Chrome, Safari ou Firefox.",
   "max-duration-reached":
-    "Durée maximale de 2 heures atteinte : l'enregistrement a été arrêté automatiquement.",
+    "Durée maximale de 2 heures atteinte : l'enregistrement s'est arrêté automatiquement, mais tout ce qui a été enregistré est sauvegardé. Démarre un nouvel enregistrement pour continuer.",
   "note-not-found":
-    "Cette note n'existe plus : impossible de reprendre l'enregistrement. Démarrez-en un nouveau.",
-  unknown: "Impossible d'accéder au microphone. Réessayez ou changez d'appareil.",
+    "Cette note n'existe plus : impossible de reprendre l'enregistrement. Démarres-en un nouveau.",
+  unknown:
+    "Impossible d'accéder au microphone, pour une raison inconnue. Réessaie ; si ça persiste, redémarre ton navigateur ou utilise un autre appareil.",
 };
 
 export function messageFor(code: RecorderErrorCode): string {
