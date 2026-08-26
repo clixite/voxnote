@@ -140,6 +140,7 @@ describe("middleware — matcher (exclusion des routes publiques)", () => {
     "/confidentialite",
     "/api/auth/login",
     "/api/auth/logout",
+    "/api/cron/purge",
     "/manifest.webmanifest",
     "/sw.js",
     "/icon.png",
@@ -151,10 +152,18 @@ describe("middleware — matcher (exclusion des routes publiques)", () => {
     expect(regex.test(path)).toBe(false);
   });
 
-  it.each(["/", "/notes/42", "/api/notes", "/loginfoo", "/confidentialite-fake"])(
-    "%s reste protégé",
-    (path) => {
-      expect(regex.test(path)).toBe(true);
-    },
-  );
+  it.each([
+    "/",
+    "/notes/42",
+    "/api/notes",
+    "/api/blob/upload-token",
+    "/loginfoo",
+    "/confidentialite-fake",
+    "/api/cron/autre-chose",
+    "/api/cron/purge/",
+    "/api/cron/purgefoo",
+    "/api/cron",
+  ])("%s reste protégé", (path) => {
+    expect(regex.test(path)).toBe(true);
+  });
 });

@@ -76,7 +76,13 @@ export const config = {
   // exclu en pratique, ce n'est qu'un `new RegExp(pattern).test()` nu, sans
   // ancrage, qui s'y tromperait en retentant un match plus loin dans la
   // chaîne.
+  //
+  // `api/cron/purge$` : chemin EXACT, jamais un préfixe (`api/cron/`). Vercel
+  // Cron appelle cette seule route sans cookie de session (elle vérifie
+  // `CRON_SECRET` elle-même, voir `src/app/api/cron/purge/route.ts`) ; un
+  // préfixe ouvrirait tout un sous-arbre `api/cron/*` aux appels anonymes,
+  // y compris des routes qui n'ont pas cette vérification.
   matcher: [
-    "/((?!login$|confidentialite$|api/auth/login$|api/auth/logout$|manifest\\.webmanifest$|sw\\.js$|icon\\.png$|apple-icon\\.png$|icons/|_next/|favicon\\.ico$).*)",
+    "/((?!login$|confidentialite$|api/auth/login$|api/auth/logout$|api/cron/purge$|manifest\\.webmanifest$|sw\\.js$|icon\\.png$|apple-icon\\.png$|icons/|_next/|favicon\\.ico$).*)",
   ],
 };
