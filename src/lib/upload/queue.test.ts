@@ -29,6 +29,23 @@ async function makeProcessingNote(store: NoteStore) {
   return note;
 }
 
+/**
+ * Store dont l'écriture du statut "error" échoue systématiquement (panne de
+ * stockage en écrivant l'échec lui-même — voir B1) ; tout le reste se
+ * comporte comme le store en mémoire normal.
+ */
+function createStoreWithFailingErrorWrite(base: NoteStore): NoteStore {
+  return {
+    ...base,
+    async updateSegment(id, patch) {
+      if (patch.status === "error") {
+        throw new Error("panne de stockage simulée : écriture du statut d'erreur");
+      }
+      return base.updateSegment(id, patch);
+    },
+  };
+}
+
 function immediateUpload(prefix = "https://blob.example"): UploadSegmentFn {
   return vi.fn(async (ctx: QueueSegmentContext) => `${prefix}/${ctx.noteId}/${ctx.seq}`);
 }
@@ -440,5 +457,53 @@ describe("UploadQueue", () => {
     // Un réessai manuel redonne un budget frais et retente immédiatement.
     await queue.retrySegment(seg.id);
     expect(uploadSegment).toHaveBeenCalledTimes(4);
+  });
+
+  it("B1 : une écriture du statut d'erreur qui échoue ne doit jamais transformer un échec en boucle serrée", async () => {
+    const store = createStoreWithFailingErrorWrite(createMemoryNoteStore());
+    const note = await makeProcessingNote(store);
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["audio"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+
+    // Erreur "ambiguous" (ni ApiRequestError ni TypeError réseau) : sans la
+    // protection, l'échec de l'écriture du statut "error" ci-dessous laissait
+    // `retryState` sans entrée, donc le segment repartait "prêt maintenant"
+    // à chaque tick — une boucle microtâche pure, sans le moindre
+    // `setTimeout` pour la freiner.
+    const uploadSegment: UploadSegmentFn = vi.fn(async () => {
+      throw new Error("échec ambigu simulé");
+    });
+    const transcribeSegment = immediateTranscribe();
+
+    const queue = new UploadQueue({
+      store,
+      uploadSegment,
+      transcribeSegment,
+      isOnline: () => true,
+      maxAmbiguousAttempts: 2,
+      baseDelayMs: 10,
+      maxDelayMs: 40,
+    });
+
+    await queue.start();
+    await vi.advanceTimersByTimeAsync(10_000);
+
+    // C'est le COMPTEUR d'appels qui révèle la boucle, pas l'état final :
+    // sans le correctif, ce test observait des centaines d'appels en
+    // quelques millisecondes de temps réel (voire un worker gelé, la boucle
+    // affamant la file de macrotâches). Avec le correctif, le plafond
+    // "ambiguous" s'applique à l'identique du cas où l'écriture réussit.
+    expect(uploadSegment).toHaveBeenCalledTimes(3); // 1 essai + 2 réessais plafonnés
+
+    // L'écriture du statut a échoué à chaque tentative : le segment reste
+    // visible tel qu'avant le dernier échec dans le store (pas de perte de
+    // statut fantôme), mais la file, elle, s'est bien arrêtée pour de bon.
+    const seg = await firstSegment(store, note.id);
+    expect(seg.status).toBe("uploading");
   });
 });

@@ -462,6 +462,26 @@ export class UploadQueue {
     }
   }
 
+  /**
+   * INVARIANT (B1, revue sécurité) : aucun chemin de sortie de
+   * `handleFailure` ne doit laisser `retryState` sans entrée pour un segment
+   * encore vivant. Une entrée manquante est relue au prochain `runTick` comme
+   * `dueAt = 0` — indiscernable d'un segment jamais essayé, donc "prêt
+   * maintenant" : ni le backoff, ni le plafond `maxAmbiguousAttempts`, ni la
+   * sentinelle `STOPPED` ne s'appliquent plus. Sans latence réseau, ça
+   * rejoue le même transport des centaines de fois par seconde en boucle
+   * microtâche pure (aucun `setTimeout` en jeu, donc rien pour la freiner) :
+   * worker gelé en test, onglet figé et batterie vidée en vrai — précisément
+   * le risque de stockage sous pression que la skill `audio-web` signale
+   * pour Safari iOS (`QuotaExceededError`, `UnknownError`).
+   *
+   * D'où la règle : `state.nextRetryAt` est calculé et posé dans
+   * `retryState` AVANT toute écriture dans le store, jamais après — une
+   * panne en écrivant l'échec ne doit jamais, EN PLUS, faire sauter cette
+   * protection. La seule suppression volontaire de l'entrée est le cas
+   * "segment/note disparu" (`isMissingEntityError`) : légitime, puisque
+   * "vivant" est justement la condition de l'invariant.
+   */
   private async handleFailure(item: QueueSegmentContext, rawError: unknown): Promise<void> {
     const classification = classifyUploadError(rawError);
     const state: RetryBookkeeping = this.retryState.get(item.segmentId) ?? {
@@ -484,29 +504,34 @@ export class UploadQueue {
       state.ambiguousStreak = 0;
     }
 
+    // Posé avant l'écriture (voir l'invariant ci-dessus) : à partir d'ici,
+    // TOUT retour de cette fonction respecte l'invariant sans y penser à
+    // nouveau, sauf la suppression explicite et justifiée plus bas.
+    state.nextRetryAt =
+      tier === "non-retryable"
+        ? STOPPED
+        : this.now() +
+          computeBackoffDelayMs(state.attempt, {
+            baseDelayMs: this.baseDelayMs,
+            maxDelayMs: this.maxDelayMs,
+          });
+    this.retryState.set(item.segmentId, state);
+
     try {
       await this.store.updateSegment(item.segmentId, { status: "error", error: message });
     } catch (writeErr) {
       if (isMissingEntityError(writeErr)) {
+        // Segment/note réellement disparu (RGPD) : plus rien à retenter.
+        // Retire l'entrée qu'on vient de poser — pas une violation de
+        // l'invariant, "vivant" en est la condition même.
         this.retryState.delete(item.segmentId);
         return;
       }
-      // Panne de stockage en écrivant l'échec lui-même : sans plus
-      // d'insistance ici, le prochain tick relira l'état réel du store.
+      // Panne de stockage en écrivant l'échec lui-même : le statut réel du
+      // segment reste ce qu'il était (l'écriture a échoué), mais
+      // `retryState` porte déjà le prochain rendez-vous posé ci-dessus — le
+      // prochain tick ne le retentera pas avant son heure.
       return;
-    }
-
-    if (tier === "non-retryable") {
-      state.nextRetryAt = STOPPED;
-      this.retryState.set(item.segmentId, state);
-    } else {
-      state.nextRetryAt =
-        this.now() +
-        computeBackoffDelayMs(state.attempt, {
-          baseDelayMs: this.baseDelayMs,
-          maxDelayMs: this.maxDelayMs,
-        });
-      this.retryState.set(item.segmentId, state);
     }
 
     await this.syncNote(item.noteId).catch(() => {});
