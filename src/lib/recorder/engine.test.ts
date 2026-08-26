@@ -206,4 +206,96 @@ describe("RecorderEngine", () => {
     });
     expect(() => engine.dispose()).not.toThrow();
   });
+
+  describe("reprise d'une note existante (refresh en cours d'enregistrement)", () => {
+    it("reprend la numérotation après les segments déjà persistés : le prochain seq est le max existant + 1, pas 0", async () => {
+      const { store, engine, note } = await setup({ segmentMs: 1000 });
+      // Simule une note déjà enregistrée sur 3 segments (seq 0, 1, 2) avant un refresh.
+      for (let seq = 0; seq < 3; seq += 1) {
+        await store.appendSegment({
+          noteId: note.id,
+          seq,
+          blob: new Blob([`déjà-persisté-${seq}`]),
+          mimeType: "audio/webm;codecs=opus",
+          durationMs: 1000,
+        });
+      }
+
+      // Même noteId qu'à la construction : c'est une reprise, pas une nouvelle note.
+      await engine.start();
+      expect(engine.getSnapshot().segmentCount).toBe(3);
+      expect(engine.getSnapshot().elapsedMs).toBe(3000);
+
+      await vi.advanceTimersByTimeAsync(1000); // ferme le 4e segment de la note
+
+      const segments = await store.listSegments(note.id);
+      expect(segments.map((s) => s.seq)).toEqual([0, 1, 2, 3]);
+      expect(engine.getSnapshot().segmentCount).toBe(4);
+    });
+
+    it("recharge la durée cumulée depuis les segments existants, pas depuis un compteur en mémoire", async () => {
+      const { store, engine, note } = await setup({ segmentMs: 1000 });
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["a"]),
+        mimeType: "audio/webm;codecs=opus",
+        durationMs: 4000,
+      });
+
+      await engine.start();
+      expect(engine.getSnapshot().elapsedMs).toBe(4000);
+
+      await vi.advanceTimersByTimeAsync(1000);
+      expect(engine.getSnapshot().elapsedMs).toBe(5000);
+
+      const persistedNote = await store.getNote(note.id);
+      expect(persistedNote?.durationMs).toBe(5000);
+    });
+
+    it("le plafond de durée s'applique au cumul de la note, pas à la seule session en cours", async () => {
+      const { store, engine, note } = await setup({ segmentMs: 5000, maxDurationMs: 10_000 });
+      await store.appendSegment({
+        noteId: note.id,
+        seq: 0,
+        blob: new Blob(["a"]),
+        mimeType: "audio/webm;codecs=opus",
+        durationMs: 9000,
+      });
+
+      await engine.start();
+      // Il ne reste que 1000 ms de budget avant le plafond de 10 000 ms.
+      await vi.advanceTimersByTimeAsync(1000);
+
+      const snapshot = engine.getSnapshot();
+      expect(snapshot.state).toBe("stopped");
+      expect(snapshot.error?.code).toBe("max-duration-reached");
+      expect(snapshot.elapsedMs).toBe(10_000);
+      expect((await store.listSegments(note.id)).map((s) => s.durationMs)).toEqual([9000, 1000]);
+    });
+
+    it("reprendre une note inexistante échoue proprement avec un message français, jamais une InvalidRecorderTransitionError", async () => {
+      FakeMediaRecorder.supportedTypes = new Set(["audio/webm;codecs=opus"]);
+      const store = createFakeNoteStore();
+      const stream = createFakeMediaStream();
+      const engine = new RecorderEngine({
+        store,
+        noteId: "note-jamais-creee",
+        stream,
+        createMediaRecorder: (s, o) => new FakeMediaRecorder(s, o) as unknown as MediaRecorder,
+        isTypeSupported: (t) => FakeMediaRecorder.isTypeSupported(t),
+      });
+
+      await expect(engine.start()).rejects.toMatchObject({
+        code: "note-not-found",
+        message: expect.stringMatching(/n'existe plus/),
+      });
+      expect(engine.getSnapshot().state).toBe("error");
+
+      // Un second essai sur la même note absente doit rester une RecorderError
+      // propre (l'auto-boucle error→ERROR de la machine sert précisément ça).
+      await expect(engine.start()).rejects.toMatchObject({ code: "note-not-found" });
+      expect(engine.getSnapshot().state).toBe("error");
+    });
+  });
 });

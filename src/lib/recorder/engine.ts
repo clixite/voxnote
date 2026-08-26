@@ -31,6 +31,7 @@ import {
   maxDurationReachedError,
   messageFor,
   noSupportedMimeTypeError,
+  noteNotFoundError,
   RecorderError,
 } from "./errors";
 import { transition, type RecorderState } from "./machine";
@@ -126,9 +127,27 @@ export class RecorderEngine {
     return () => this.listeners.delete(listener);
   }
 
-  /** Démarre l'enregistrement. Rejette avec une `RecorderError` française en cas d'échec. */
+  /**
+   * Démarre l'enregistrement. Rejette avec une `RecorderError` française en
+   * cas d'échec.
+   *
+   * Reprise d'une note existante : `noteId` (fixé à la construction) peut
+   * désigner une note qui a déjà des segments persistés (ex. après un
+   * refresh en cours d'enregistrement). Dans ce cas, la numérotation du
+   * prochain segment et la durée cumulée sont TOUJOURS relues depuis le
+   * `NoteStore` juste avant de démarrer — jamais déduites d'un compteur en
+   * mémoire, qui vaudrait 0 pour un moteur fraîchement recréé après un
+   * refresh. Pour une note tout juste créée, `listSegments` renvoie
+   * simplement `[]` : le comportement de départ (seq 0, durée 0) est
+   * inchangé.
+   */
   start(): Promise<void> {
     return this.enqueue(async () => {
+      // Validée avant tout effet de bord : un start() illégitime (déjà en
+      // cours, déjà arrêté...) ne doit déclencher ni détection mimeType ni
+      // lecture du store.
+      const startedState = transition(this.state, "START");
+
       if (!this.mimeType) {
         const detected = pickSupportedMimeType(this.isTypeSupported);
         if (!detected) {
@@ -140,9 +159,19 @@ export class RecorderEngine {
         this.mimeType = detected;
       }
 
-      this.state = transition(this.state, "START");
-      this.accumulatedMs = 0;
-      this.nextSeq = 0;
+      const note = await this.store.getNote(this.noteId);
+      if (!note) {
+        this.state = transition(this.state, "ERROR");
+        this.lastError = noteNotFoundError();
+        this.emit();
+        throw this.lastError;
+      }
+
+      const existingSegments = await this.store.listSegments(this.noteId);
+      this.nextSeq = existingSegments.reduce((max, s) => Math.max(max, s.seq + 1), 0);
+      this.accumulatedMs = existingSegments.reduce((sum, s) => sum + s.durationMs, 0);
+
+      this.state = startedState;
       this.lastError = undefined;
       this.emit();
       await this.beginCycle();
