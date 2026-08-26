@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  duplicateSegmentError,
   maxDurationReachedError,
   messageFor,
+  nonRetryableStoreError,
   noSupportedMimeTypeError,
   noteNotFoundError,
   RecorderError,
@@ -58,6 +60,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "duplicate-segment",
       "storage-full",
       "unknown",
     ] as const;
@@ -77,6 +80,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "duplicate-segment",
       "storage-full",
       "unknown",
     ] as const;
@@ -90,7 +94,7 @@ describe("toRecorderError", () => {
     // explicite : la preuve qu'il reste une action à faire, pas seulement un
     // constat d'échec.
     const actionPattern =
-      /réessaie|autorise|ferme|branche|démarre|essaie|ouvre|utilise|redémarre|vérifie/i;
+      /réessaie|autorise|ferme|branche|démarre|essaie|ouvre|utilise|redémarre|vérifie|termine|arrête/i;
     const codes = [
       "permission-denied",
       "no-microphone",
@@ -101,6 +105,7 @@ describe("toRecorderError", () => {
       "no-supported-mime-type",
       "max-duration-reached",
       "note-not-found",
+      "duplicate-segment",
       "storage-full",
       "unknown",
     ] as const;
@@ -136,5 +141,48 @@ describe("erreurs dédiées", () => {
     // Le message ne doit jamais laisser croire à une perte de données déjà
     // écrites : c'est tout le sens de la garde B1 dans RecorderEngine.
     expect(error.message).toMatch(/intact|sauvegardé|déjà enregistré/);
+  });
+
+  it("duplicateSegmentError pointe la vraie cause (un autre onglet), jamais 'stockage plein'", () => {
+    const error = duplicateSegmentError();
+    expect(error.code).toBe("duplicate-segment");
+    expect(error.message).toMatch(/autre onglet/);
+    expect(error.message).not.toMatch(/stockage|plein/i);
+  });
+});
+
+describe("nonRetryableStoreError", () => {
+  it("reconnaît DuplicateSegmentSeqError (deux onglets sur la même note) : ne retente pas, dit la vraie cause", () => {
+    const raw = new Error("Un segment porte déjà le seq 3 pour la note note-1");
+    raw.name = "DuplicateSegmentSeqError";
+    const error = nonRetryableStoreError(raw);
+    expect(error).toBeInstanceOf(RecorderError);
+    expect(error?.code).toBe("duplicate-segment");
+    expect(error?.message).toMatch(/autre onglet/);
+  });
+
+  it("reconnaît NoteNotFoundError (note disparue) : ne retente pas", () => {
+    const raw = new Error("Note introuvable : note-1");
+    raw.name = "NoteNotFoundError";
+    const error = nonRetryableStoreError(raw);
+    expect(error).toBeInstanceOf(RecorderError);
+    expect(error?.code).toBe("note-not-found");
+  });
+
+  it("renvoie undefined pour une erreur inconnue (quota, base bloquée...) : candidate à une reprise", () => {
+    expect(nonRetryableStoreError(new Error("QuotaExceededError simulé"))).toBeUndefined();
+    expect(nonRetryableStoreError(new DOMException("bloqué", "InvalidStateError"))).toBeUndefined();
+    expect(nonRetryableStoreError("pas une Error du tout")).toBeUndefined();
+    expect(nonRetryableStoreError(undefined)).toBeUndefined();
+  });
+
+  it("n'a pas besoin d'instanceof : reconnaît une erreur par son .name, quelle que soit son implémentation NoteStore d'origine", () => {
+    class UnrelatedButSameName extends Error {
+      constructor() {
+        super("peu importe");
+        this.name = "DuplicateSegmentSeqError";
+      }
+    }
+    expect(nonRetryableStoreError(new UnrelatedButSameName())?.code).toBe("duplicate-segment");
   });
 });

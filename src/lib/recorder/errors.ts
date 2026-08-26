@@ -15,6 +15,7 @@ export type RecorderErrorCode =
   | "no-supported-mime-type"
   | "max-duration-reached"
   | "note-not-found"
+  | "duplicate-segment"
   | "storage-full"
   | "unknown";
 
@@ -46,6 +47,8 @@ const MESSAGES: Record<RecorderErrorCode, string> = {
     "Durée maximale de 2 heures atteinte : l'enregistrement s'est arrêté automatiquement, mais tout ce qui a été enregistré est sauvegardé. Démarre un nouvel enregistrement pour continuer.",
   "note-not-found":
     "Cette note n'existe plus : impossible de reprendre l'enregistrement. Démarres-en un nouveau.",
+  "duplicate-segment":
+    "Cette note est déjà en cours d'enregistrement ailleurs, probablement dans un autre onglet. Termine-la là-bas, ou arrête cet enregistrement-ci : les deux ne peuvent pas continuer en même temps sur la même note.",
   "storage-full":
     "Le stockage de cet appareil est plein : l'enregistrement s'est arrêté. Tout ce qui a déjà été enregistré est intact et sauvegardé. Libère de la place sur ton appareil, puis démarre un nouvel enregistrement.",
   unknown:
@@ -111,4 +114,45 @@ export function noteNotFoundError(): RecorderError {
  */
 export function storageFullError(): RecorderError {
   return new RecorderError("storage-full", messageFor("storage-full"));
+}
+
+export function duplicateSegmentError(): RecorderError {
+  return new RecorderError("duplicate-segment", messageFor("duplicate-segment"));
+}
+
+/**
+ * Reconnaît, par son nom, une erreur du `NoteStore` dont on sait qu'elle ne
+ * peut PAS être transitoire : retenter ne changera rien. Renvoie `undefined`
+ * pour tout le reste (quota, base momentanément bloquée...), qui reste
+ * candidat à une reprise (voir `RecorderEngine.persistSegment`).
+ *
+ * La question n'est jamais « comment signaler cette erreur » mais « est-ce
+ * que réessayer a un sens ». Si non, il faut échouer tout de suite avec un
+ * message qui reflète la vraie cause :
+ * - `DuplicateSegmentSeqError` (contrainte d'unicité `(noteId, seq)` posée
+ *   par la couche de persistance) : le même `seq` violera la contrainte à
+ *   chaque tentative — observé quand la même note enregistre depuis deux
+ *   onglets à la fois. Annoncer « stockage plein » ici serait faux et ferait
+ *   perdre du temps à l'utilisateur à chercher de l'espace disque pour rien.
+ * - `NoteNotFoundError` : la note a disparu (supprimée entre-temps,
+ *   éventuellement depuis un autre onglet) ; réessayer trois fois ne la fera
+ *   pas revenir.
+ *
+ * Identifié par `.name` plutôt que par `instanceof` (comme
+ * `codeForDomExceptionName` ci-dessus pour les `DOMException`) : ce module
+ * n'a pas besoin d'importer les classes concrètes de `src/lib/store/errors.ts`
+ * pour rester correct, et ça fonctionne pareil quelle que soit
+ * l'implémentation de `NoteStore` (IndexedDB, mémoire, une future autre) tant
+ * qu'elle respecte la convention `this.name = "NomDeClasseError"`.
+ */
+export function nonRetryableStoreError(rawError: unknown): RecorderError | undefined {
+  const name = (rawError as { name?: string } | undefined)?.name;
+  switch (name) {
+    case "DuplicateSegmentSeqError":
+      return duplicateSegmentError();
+    case "NoteNotFoundError":
+      return noteNotFoundError();
+    default:
+      return undefined;
+  }
 }

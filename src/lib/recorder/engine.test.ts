@@ -207,6 +207,22 @@ describe("RecorderEngine", () => {
     expect(() => engine.dispose()).not.toThrow();
   });
 
+  it("dispose() persiste en best-effort le segment en cours (résiduel Phase 4 : démontage pendant un enregistrement)", async () => {
+    const { store, engine, note } = await setup({ segmentMs: 5000 });
+    await engine.start();
+    await vi.advanceTimersByTimeAsync(2000); // 2s de segment en cours, jamais fermé normalement
+
+    expect(() => engine.dispose()).not.toThrow();
+    // dispose() est synchrone (cleanup de useEffect) : la persistance qu'il
+    // déclenche est un fire-and-forget qui se termine sur les microtâches
+    // suivantes (arrêt du MediaRecorder puis écriture dans le store).
+    await vi.advanceTimersByTimeAsync(0);
+
+    const segments = await store.listSegments(note.id);
+    expect(segments).toHaveLength(1);
+    expect(segments[0]?.durationMs).toBe(2000);
+  });
+
   describe("reprise d'une note existante (refresh en cours d'enregistrement)", () => {
     it("reprend la numérotation après les segments déjà persistés : le prochain seq est le max existant + 1, pas 0", async () => {
       const { store, engine, note } = await setup({ segmentMs: 1000 });
@@ -369,6 +385,70 @@ describe("RecorderEngine", () => {
       expect(segments.map((s) => s.seq)).toEqual([0]);
       expect(engine.getSnapshot().state).toBe("recording"); // pas d'erreur visible : l'enregistrement continue
       expect(engine.getSnapshot().error).toBeUndefined();
+    });
+  });
+
+  describe("discrimination des erreurs du NoteStore : ne retente que ce qui a une chance de réussir", () => {
+    it("DuplicateSegmentSeqError (deux onglets sur la même note) échoue IMMÉDIATEMENT, sans retenter, avec le bon code", async () => {
+      const { store, engine, note } = await setup({ segmentMs: 1000 });
+      const appendSpy = vi.spyOn(store, "appendSegment").mockImplementation(async () => {
+        const err = new Error(`Un segment porte déjà le seq 0 pour la note ${note.id}`);
+        err.name = "DuplicateSegmentSeqError";
+        throw err;
+      });
+      const listener = vi.fn();
+      engine.subscribe(listener);
+
+      await engine.start();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      // Avant la correction : cette erreur était traitée comme n'importe
+      // quelle autre panne de stockage, retentée 3 fois, puis annoncée comme
+      // "storage-full" — faux (le même seq revioleraLa contrainte à chaque
+      // tentative, retenter est inutile) et inactionnable pour l'utilisateur.
+      expect(appendSpy).toHaveBeenCalledTimes(1);
+
+      const snapshot = engine.getSnapshot();
+      expect(snapshot.state).toBe("error");
+      expect(snapshot.error?.code).toBe("duplicate-segment");
+      expect(snapshot.error?.code).not.toBe("storage-full");
+      expect(snapshot.error?.message).toMatch(/autre onglet/);
+      expect(snapshot.error?.message).not.toMatch(/stockage|plein/i);
+      expect(
+        listener.mock.calls.some(([s]) => (s as { state: string }).state === "error"),
+      ).toBe(true);
+      expect(await store.listSegments(note.id)).toEqual([]);
+    });
+
+    it("NoteNotFoundError (note supprimée en cours d'enregistrement) échoue IMMÉDIATEMENT, sans retenter", async () => {
+      const { store, engine, note } = await setup({ segmentMs: 1000 });
+      const appendSpy = vi.spyOn(store, "appendSegment").mockImplementation(async () => {
+        const err = new Error(`Note introuvable : ${note.id}`);
+        err.name = "NoteNotFoundError";
+        throw err;
+      });
+
+      await engine.start();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(appendSpy).toHaveBeenCalledTimes(1); // pas 3 : réessayer ne fera pas revenir la note
+      const snapshot = engine.getSnapshot();
+      expect(snapshot.state).toBe("error");
+      expect(snapshot.error?.code).toBe("note-not-found");
+      expect(snapshot.error?.code).not.toBe("storage-full");
+    });
+
+    it("une erreur SANS nom reconnu (quota, base bloquée...) continue de retenter comme avant (pas de régression sur B1)", async () => {
+      const { store, engine } = await setup({ segmentMs: 1000 });
+      const appendSpy = vi
+        .spyOn(store, "appendSegment")
+        .mockRejectedValue(new Error("QuotaExceededError simulé"));
+
+      await engine.start();
+      await vi.advanceTimersByTimeAsync(1000);
+
+      expect(appendSpy).toHaveBeenCalledTimes(3); // 1 essai + 2 reprises, comme avant
+      expect(engine.getSnapshot().error?.code).toBe("storage-full");
     });
   });
 

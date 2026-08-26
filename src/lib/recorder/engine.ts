@@ -28,6 +28,13 @@
  * libérés qu'après ce succès. Si l'écriture reste impossible (stockage
  * saturé), l'enregistrement s'arrête proprement en état `error`, jamais en
  * silence — voir `closeCurrentSegment` et `handleFatalError`.
+ *
+ * Toutes les erreurs du `NoteStore` ne se valent pas : `persistSegment` ne
+ * retente que celles qui ont une chance de réussir au coup suivant (quota,
+ * base momentanément bloquée). Une contrainte violée (`DuplicateSegmentSeqError`
+ * — deux onglets sur la même note) ou une note disparue (`NoteNotFoundError`)
+ * échouent immédiatement, avec un message qui reflète la vraie cause — voir
+ * `nonRetryableStoreError` dans errors.ts.
  */
 import {
   NOTE_MAX_DURATION_MS,
@@ -39,6 +46,7 @@ import {
   maxDurationReachedError,
   messageFor,
   noSupportedMimeTypeError,
+  nonRetryableStoreError,
   noteNotFoundError,
   RecorderError,
   storageFullError,
@@ -242,9 +250,34 @@ export class RecorderEngine {
     });
   }
 
-  /** Nettoyage best-effort (démontage du composant appelant). N'essaie pas de persister. */
+  /**
+   * Nettoyage best-effort au démontage du composant appelant.
+   *
+   * Tente de persister le segment en cours en best-effort, sans le garantir
+   * : `useEffect` ne peut pas attendre un cleanup asynchrone, donc c'est un
+   * fire-and-forget passé par la même file sérialisée que les autres
+   * opérations (`enqueue`), une erreur ici est avalée volontairement — plus
+   * personne n'observe ce moteur une fois démonté, un throw ne ferait que
+   * produire une rejection non gérée sans destinataire.
+   *
+   * Résiduel documenté (revue d'architecture) : le `MediaRecorder` lui-même
+   * n'est pas explicitement arrêté ici en dehors de ce best-effort — s'il
+   * échoue ou n'a pas le temps de s'exécuter, il ne s'éteint qu'indirectement
+   * quand l'appelant relâche le `MediaStream` juste après (le hook fait ça
+   * dans le même effet de démontage). Pas atteignable aujourd'hui (Phase 2 :
+   * une seule page, rien ne démonte ce composant en cours d'enregistrement),
+   * mais la Phase 4 ajoute `/note/[id]` et une navigation ailleurs rendra ce
+   * chemin réel. Si ce best-effort se révèle insuffisant à l'usage (le
+   * segment en cours d'une note ouverte puis fermée depuis `/note/[id]`
+   * manque), la vraie solution est de rendre l'arrêt asynchrone et
+   * explicitement attendu (ex. `beforeunload`/navigation confirmée côté UI
+   * appelant `stop()`) plutôt que de complexifier ce cleanup synchrone.
+   */
   dispose(): void {
     this.clearCycleTimer();
+    if (this.currentRecorder && this.state === "recording") {
+      void this.enqueue(() => this.closeCurrentSegment()).catch(() => {});
+    }
     this.listeners.clear();
   }
 
@@ -387,10 +420,21 @@ export class RecorderEngine {
   }
 
   /**
-   * Écrit le segment dans le `NoteStore`, avec quelques essais immédiats
-   * avant d'abandonner (`PERSIST_MAX_ATTEMPTS`). Le détail technique de
-   * l'échec (quota, base bloquée...) n'est jamais exposé : seul un
-   * `storageFullError()` générique et actionnable remonte à l'appelant.
+   * Écrit le segment dans le `NoteStore`. La question posée à chaque échec
+   * n'est jamais « comment le signaler » mais « est-ce que réessayer a un
+   * sens » (voir `nonRetryableStoreError` dans errors.ts) :
+   *
+   * - `DuplicateSegmentSeqError`/`NoteNotFoundError` (contrainte `(noteId,
+   *   seq)` violée, ou note disparue) échouent IMMÉDIATEMENT, sans consommer
+   *   la moindre tentative : le même `seq` reviolera la contrainte à chaque
+   *   essai, et une note supprimée ne revient pas. Les confondre avec une
+   *   panne de stockage afficherait « ton stockage est plein » à quelqu'un
+   *   dont la vraie note enregistre depuis un autre onglet — faux et
+   *   inactionnable (sondé par la revue : l'utilisateur allait supprimer des
+   *   photos pour rien).
+   * - Tout le reste (quota, base momentanément bloquée...) est potentiellement
+   *   transitoire : quelques essais immédiats (`PERSIST_MAX_ATTEMPTS`) avant
+   *   d'abandonner sur `storageFullError()`, générique et actionnable.
    */
   private async persistSegment(seq: number, blob: Blob, durationMs: number): Promise<void> {
     for (let attempt = 1; attempt <= PERSIST_MAX_ATTEMPTS; attempt += 1) {
@@ -403,8 +447,11 @@ export class RecorderEngine {
           durationMs,
         });
         return;
-      } catch {
-        // Retenté silencieusement jusqu'à épuisement des essais ci-dessous.
+      } catch (rawError) {
+        const fatal = nonRetryableStoreError(rawError);
+        if (fatal) throw fatal;
+        // Sinon, probablement transitoire : retenté silencieusement jusqu'à
+        // épuisement des essais ci-dessous.
       }
     }
     throw storageFullError();
