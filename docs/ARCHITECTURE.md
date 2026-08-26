@@ -133,6 +133,8 @@ persistant hors le Blob (pas de base de données en v1).
 | Segmentation ~5 min | Borne la perte, contourne la limite de taille par fichier, permet la progression | Fichier unique — tout ou rien |
 | IndexedDB avant upload | Un refresh ou un crash ne perd que le segment en cours | État en mémoire — perte totale |
 | Interface `TranscriptionProvider` | Bascule UE ↔ US par variable d'environnement, sans refactor | Appel direct au SDK — verrou fournisseur |
+| Transcription synchrone, un appel par segment | Sans base, un job asynchrone n'a nulle part où stocker son état ; le client le connaît déjà | Job + polling — réintroduirait une base ou mentirait sur l'état |
+| Suppression et purge par préfixe de blob | Le serveur retrouve les blobs d'une note sans rien mémoriser | Liste d'URL fournie par le client — un oubli laisse de l'audio orphelin |
 | Blob privé + TTL 7 jours | RGPD : minimisation et limitation de conservation | Blob public — URL devinable, fuite |
 
 ## Accès protégé par mot de passe unique

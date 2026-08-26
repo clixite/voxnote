@@ -118,7 +118,11 @@ describe("RecorderScreen", () => {
     expect(screen.getByRole("button", { name: /reprendre/i })).toBeInTheDocument();
   });
 
-  it("permission refusée : message français affiché en role alert", async () => {
+  it("permission refusée : erreur en role alert avec le conseil de réactivation du micro", async () => {
+    // Le texte exact du message vient de src/lib/recorder/errors.ts et peut
+    // être reformulé sans préavis (tutoiement en cours côté hook) : on
+    // n'assertionne que sur ce qui nous appartient — role="alert" et le
+    // conseil affiché en fonction du errorCode.
     setSupported("audio/webm;codecs=opus");
     const store = createFakeNoteStore();
     const getUserMedia = vi.fn(async () => {
@@ -140,7 +144,7 @@ describe("RecorderScreen", () => {
     });
 
     const alert = await screen.findByRole("alert");
-    expect(alert).toHaveTextContent(/microphone refusé/i);
+    expect(alert).toHaveTextContent(/autorise le micro/i);
   });
 
   it("affiche le bandeau wake lock quand le verrou est indisponible, l'absente quand il fonctionne", async () => {
@@ -251,6 +255,103 @@ describe("RecorderScreen", () => {
     });
 
     expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+
+    clearActiveRecordingMarker();
+  });
+
+  it("reprendre continue réellement la note interrompue : la numérotation repart de l'existant, pas de zéro", async () => {
+    setSupported("audio/webm;codecs=opus");
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 4000,
+    });
+    writeActiveRecordingMarker(note.id);
+
+    render(
+      <RecorderScreen
+        store={store}
+        getUserMedia={vi.fn(async () => createFakeMediaStream())}
+        isTypeSupported={(t) => FakeMediaRecorder.isTypeSupported(t)}
+        createMediaRecorder={fakeMediaRecorderFactory()}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+        segmentMs={1000}
+      />,
+    );
+
+    // La détection de la note interrompue est asynchrone (lecture du store) :
+    // on attend son affichage avec de vrais minuteurs avant de passer aux
+    // minuteurs simulés pour la rotation de segment ci-dessous (un `waitFor`
+    // sous minuteurs simulés resterait bloqué, son polling interne ne serait
+    // jamais réveillé).
+    const resumeButton = await screen.findByRole("button", { name: /reprendre l'enregistrement/i });
+    vi.useFakeTimers();
+
+    await act(async () => {
+      resumeButton.click();
+    });
+
+    // Aucune nouvelle note créée : le compteur affiche déjà 1 (le segment
+    // repris), pas 0, dès que l'enregistrement redémarre.
+    expect(screen.getByRole("button", { name: /arrêter/i })).toBeInTheDocument();
+    expect(screen.getByTestId("segment-status")).toHaveTextContent(/1 segment enregistré/i);
+    expect(screen.queryByText(/non terminé/i)).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(screen.getByTestId("segment-status")).toHaveTextContent(/2 segments enregistrés/i);
+
+    const allSegments = await store.listSegments(note.id);
+    expect(allSegments).toHaveLength(2);
+    expect(allSegments[0]?.seq).toBe(0);
+    expect(allSegments[1]?.seq).toBe(1);
+    const notesInStore = await store.listNotes();
+    expect(notesInStore).toHaveLength(1); // toujours la même note, aucun doublon créé.
+
+    clearActiveRecordingMarker();
+  });
+
+  it("note disparue entre-temps : la reprise échoue et s'affiche comme n'importe quelle autre erreur", async () => {
+    setSupported("audio/webm;codecs=opus");
+    const store = createFakeNoteStore();
+    const note = await store.createNote({ lang: "fr" });
+    await store.appendSegment({
+      noteId: note.id,
+      seq: 0,
+      blob: new Blob(["x"]),
+      mimeType: "audio/webm",
+      durationMs: 1000,
+    });
+    writeActiveRecordingMarker(note.id);
+
+    render(
+      <RecorderScreen
+        store={store}
+        isTypeSupported={(t) => FakeMediaRecorder.isTypeSupported(t)}
+        wakeLock={createWorkingWakeLock()}
+        documentRef={fakeDocument}
+      />,
+    );
+
+    const resumeButton = await screen.findByRole("button", { name: /reprendre l'enregistrement/i });
+
+    // La note disparaît avant que l'utilisateur ne clique (ex. purge RGPD).
+    await store.deleteNote(note.id);
+
+    await act(async () => {
+      resumeButton.click();
+    });
+
+    const alert = await screen.findByRole("alert");
+    // Aucun conseil pour ce code (pas de réponse fiable) : seul le message du
+    // hook doit apparaître, jamais un conseil inventé.
+    expect(alert.querySelectorAll("p")).toHaveLength(1);
 
     clearActiveRecordingMarker();
   });

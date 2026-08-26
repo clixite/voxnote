@@ -1,23 +1,42 @@
 "use client";
 
+import type { RecorderErrorCode } from "@/lib/recorder/errors";
+
 export interface ErrorBannerProps {
   /** Message français prêt à afficher tel quel (voir src/lib/recorder/errors.ts). */
   message: string | undefined;
+  /** Code discriminant de l'erreur, pour choisir un conseil adapté (voir ADVICE_BY_CODE). */
+  code?: RecorderErrorCode;
   onRetry?: () => void;
 }
 
 /**
- * Affiche tel quel le message français fourni par le hook — jamais de
- * réécriture (CLAUDE.md #6). La porte de sortie (comment réactiver le
- * micro) est générique plutôt que conditionnée au type d'erreur exact : le
- * hook n'expose que `errorMessage` (texte), pas le code d'erreur d'origine
- * (`RecorderError.code`), donc on ne peut pas distinguer « refusé » de
- * « occupé » ou « aucun micro » sans analyser le texte du message, ce qui
- * serait fragile. Le conseil ci-dessous reste pertinent dans tous les cas
- * liés au micro, qui couvrent l'essentiel des erreurs possibles ici.
+ * Conseil affiché sous le message d'erreur, adapté au code plutôt que
+ * générique : mieux vaut aucun conseil qu'un conseil qui ne correspond pas à
+ * la situation réelle. Seuls les codes où une action concrète et fiable
+ * existe ont une entrée ; les autres (contrainte non supportée, contexte non
+ * sécurisé, plafond de durée, note introuvable, type non supporté, inconnu…)
+ * n'affichent que le message du hook.
  */
-export default function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
+const ADVICE_BY_CODE: Partial<Record<RecorderErrorCode, string>> = {
+  "permission-denied":
+    "Autorise le micro pour VoxNote : ouvre les réglages de ce site dans ton navigateur (l'icône à côté de l'adresse) ou les réglages micro de ton appareil, puis appuie sur Réessayer.",
+  "no-microphone":
+    "Aucun micro n'est détecté. Branche un micro, ou vérifie que ton appareil en a bien un d'activé, puis réessaie.",
+  "microphone-busy":
+    "Une autre application (ou un autre onglet) utilise déjà le micro. Ferme-la, puis réessaie.",
+};
+
+/**
+ * Affiche tel quel le message français fourni par le hook — jamais de
+ * réécriture (CLAUDE.md #6). Le conseil, lui, appartient entièrement à ce
+ * composant : construit à partir du `code` discriminant exposé par le hook,
+ * jamais en analysant le texte du message (qui peut être reformulé sans
+ * préavis pour l'utilisateur, comme l'a montré le passage au tutoiement).
+ */
+export default function ErrorBanner({ message, code, onRetry }: ErrorBannerProps) {
   if (!message) return null;
+  const advice = code ? ADVICE_BY_CODE[code] : undefined;
 
   return (
     <div
@@ -28,10 +47,7 @@ export default function ErrorBanner({ message, onRetry }: ErrorBannerProps) {
         <span className="font-semibold">Erreur : </span>
         {message}
       </p>
-      <p className="text-red-300/90">
-        Astuce : vérifie que le microphone est autorisé pour VoxNote dans les
-        réglages de ton navigateur ou de ton appareil, puis réessaie.
-      </p>
+      {advice && <p className="text-red-300/90">{advice}</p>}
       {onRetry && (
         <button
           type="button"

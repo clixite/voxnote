@@ -156,6 +156,20 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     });
   }
 
+  // Reprend réellement la note interrompue détectée au montage : le hook
+  // relit ses segments existants et poursuit la numérotation, sans rien
+  // recréer (voir ResumeNotice). `lang` est ignoré par le hook dès qu'un
+  // `noteId` est fourni — "auto" n'est là que comme valeur neutre du
+  // paramètre. Si la note a disparu entre-temps, le hook rejette avec le
+  // code `note-not-found` : on l'affiche comme n'importe quelle autre erreur
+  // (voir ErrorBanner) plutôt que de la traiter spécialement.
+  function handleResumeInterruptedNote(noteId: string) {
+    setInterruptedNote(null);
+    recorder.start(DEFAULT_LANG, { noteId }).catch(() => {
+      // Déjà reflété dans errorMessage/errorCode par le hook.
+    });
+  }
+
   function handleStop() {
     recorder.stop().catch(() => {});
   }
@@ -189,12 +203,12 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       {interruptedNote && (
         <ResumeNotice
           note={interruptedNote}
-          onResume={handleStart}
+          onResume={() => handleResumeInterruptedNote(interruptedNote.noteId)}
           onFinish={handleFinishInterrupted}
         />
       )}
 
-      <ErrorBanner message={recorder.errorMessage} onRetry={handleStart} />
+      <ErrorBanner message={recorder.errorMessage} code={recorder.errorCode} onRetry={handleStart} />
 
       <WakeLockBanner show={showWakeLockBanner} />
 

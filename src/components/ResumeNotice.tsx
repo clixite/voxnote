@@ -20,13 +20,14 @@ export interface ResumeNoticeProps {
  * (refresh, crash, onglet fermé) — voir activeRecordingMarker.ts pour la
  * détection et RecorderScreen pour l'argumentaire complet de ce choix.
  *
- * « Reprendre » démarre une nouvelle note : `useRecorder.start()` n'a pas de
- * moyen de rattacher un nouvel enregistrement à un `noteId` existant (ce
- * serait à ajouter côté hook, hors périmètre de ce ticket — signalé au
- * rapport). Le texte le dit explicitement plutôt que de laisser croire à une
- * continuité qui n'existe pas. « Terminer » ne fait disparaître que cet
- * avertissement : les segments déjà enregistrés restent tels quels en
- * IndexedDB, prêts pour la suite du pipeline.
+ * « Reprendre » continue réellement cette note : `useRecorder.start(lang, { noteId })`
+ * relit les segments existants et reprend la numérotation à la suite, sans
+ * rien recréer. C'est le message le plus important de l'écran — un refresh
+ * ou un crash pendant un enregistrement doit être un non-événement, pas un
+ * moment de panique, donc le texte l'affirme sans détour : rien n'est perdu,
+ * l'enregistrement continue là où il s'est arrêté. « Terminer » ne fait
+ * disparaître que cet avertissement : les segments déjà enregistrés restent
+ * tels quels en IndexedDB, prêts pour la suite du pipeline.
  */
 export default function ResumeNotice({ note, onResume, onFinish }: ResumeNoticeProps) {
   const when = new Date(note.createdAt).toLocaleString("fr-FR", {
@@ -64,8 +65,9 @@ export default function ResumeNotice({ note, onResume, onFinish }: ResumeNoticeP
         </button>
       </div>
       <p className="text-xs text-sky-200/80">
-        Reprendre démarre une nouvelle note ; celle-ci reste disponible telle
-        quelle. Terminer garde ses segments enregistrés sans les modifier.
+        Reprendre continue cet enregistrement exactement là où il s&apos;est
+        arrêté : rien n&apos;est perdu. Terminer laisse ses segments tels
+        quels, sans en ajouter d&apos;autres.
       </p>
     </div>
   );

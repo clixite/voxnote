@@ -136,9 +136,10 @@ rétro-adapter des pages publiques. Aucune base de données.
 - Erreurs traduites en messages utilisateur français (quota, audio illisible, réseau, service indisponible).
 - Tests unitaires avec provider mocké : succès, erreur retryable, erreur définitive.
 
-**[P3-3] `POST /api/transcribe` + `GET /api/transcribe/[jobId]`** · `dev-backend` 🔒
+**[P3-3] `POST /api/transcribe`** · `dev-backend` 🔒
 - Reçoit **une URL de blob**, jamais un binaire (vérifié par un test qui envoie un body volumineux → refus).
-- Statut par segment renvoyé au client ; assemblage ordonné par `seq`.
+- **Synchrone, un appel par segment. Pas d'identifiant de tâche, pas de route de polling** : un job asynchrone impose de stocker son état, et sans base de données ce stockage n'existe pas côté serveur. Le client tient l'état en IndexedDB et rejoue les segments manquants ; c'est lui qui sait, pas le serveur.
+- Le client peut paralléliser plusieurs segments ; l'assemblage suit `seq`, jamais l'ordre des réponses.
 - Rate limiting, session valide exigée. Tests d'intégration.
 
 **[P3-4] Queue d'upload client avec retry** · `dev-frontend` 🔒
