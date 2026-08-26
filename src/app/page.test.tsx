@@ -1,8 +1,19 @@
 import { render, screen } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it, vi } from "vitest";
 import HomePage from "./page";
 
+const pushMock = vi.fn();
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: pushMock }),
+}));
+
 describe("HomePage", () => {
+  beforeEach(() => {
+    pushMock.mockClear();
+  });
+
+
   it("affiche le bouton Enregistrer désactivé avec la mention bientôt disponible", () => {
     render(<HomePage />);
 
@@ -20,5 +31,13 @@ describe("HomePage", () => {
     expect(
       screen.getByRole("link", { name: /confidentialité/i }),
     ).toHaveAttribute("href", "/confidentialite");
+  });
+
+  it("affiche un bouton de déconnexion", () => {
+    render(<HomePage />);
+
+    expect(
+      screen.getByRole("button", { name: /se déconnecter/i }),
+    ).toBeInTheDocument();
   });
 });
