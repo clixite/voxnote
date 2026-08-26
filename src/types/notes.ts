@@ -174,6 +174,11 @@ export interface NoteStore {
    * (lecture, test, écriture), ce qu'IndexedDB sérialise par construction sur
    * un même object store. C'est la primitive d'exclusion mutuelle qui manquait.
    *
+   * **Précondition : `staleBefore` doit être passé** (typiquement
+   * `Date.now() - STALE_THRESHOLD_MS`). Avec une valeur dans le futur, toute
+   * réservation paraît périmée et l'exclusion mutuelle disparaît : plusieurs
+   * appelants obtiennent `true` sur le même segment. Vérifié en revue.
+   *
    * Renvoie `false` si le segment est déjà réservé par un autre onglet et que
    * cette réservation n'est pas périmée. Une réservation antérieure à
    * `staleBefore` est reprenable : un onglet mort ne doit jamais bloquer un
