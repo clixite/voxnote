@@ -44,6 +44,7 @@ describe("useRecorder", () => {
     expect(result.current.state).toBe("error");
     expect(result.current.errorMessage).toMatch(/refusé/i);
     expect(result.current.errorMessage).not.toMatch(/NotAllowedError/);
+    expect(result.current.errorCode).toBe("permission-denied");
     expect(createNoteSpy).not.toHaveBeenCalled();
   });
 
@@ -71,6 +72,7 @@ describe("useRecorder", () => {
     expect(createNoteSpy).not.toHaveBeenCalled();
     expect(result.current.mimeTypeSupported).toBe(false);
     expect(result.current.errorMessage).toMatch(/navigateur/i);
+    expect(result.current.errorCode).toBe("no-supported-mime-type");
   });
 
   it("micro déjà utilisé par une autre application → message français dédié", async () => {
@@ -88,6 +90,7 @@ describe("useRecorder", () => {
       await expect(result.current.start("fr")).rejects.toMatchObject({ code: "microphone-busy" });
     });
     expect(result.current.errorMessage).toMatch(/déjà utilisé/);
+    expect(result.current.errorCode).toBe("microphone-busy");
   });
 
   it("si l'engine échoue à démarrer après getUserMedia, nettoie la note orpheline et la piste micro", async () => {
@@ -118,6 +121,88 @@ describe("useRecorder", () => {
 
     expect(deleteNoteSpy).toHaveBeenCalledTimes(1);
     expect(stopTrack).toHaveBeenCalledTimes(1);
+  });
+
+  describe("reprise d'une note existante (start(lang, { noteId }))", () => {
+    it("reprend au lieu de créer : pas de createNote, engine reçoit le noteId fourni", async () => {
+      setSupported("audio/webm;codecs=opus");
+      const store = createFakeNoteStore();
+      const existingNote = await store.createNote({ lang: "fr" });
+      await store.appendSegment({
+        noteId: existingNote.id,
+        seq: 0,
+        blob: new Blob(["a"]),
+        mimeType: "audio/webm;codecs=opus",
+        durationMs: 4000,
+      });
+      const createNoteSpy = vi.spyOn(store, "createNote");
+      const stream = createFakeMediaStream();
+      const getUserMedia = vi.fn(async () => stream);
+
+      const { result } = renderHook(() =>
+        useRecorder({
+          store,
+          getUserMedia,
+          isTypeSupported: (t) => FakeMediaRecorder.isTypeSupported(t),
+          createMediaRecorder: (s, o) => new FakeMediaRecorder(s, o) as unknown as MediaRecorder,
+        }),
+      );
+
+      await act(async () => {
+        await result.current.start("fr", { noteId: existingNote.id });
+      });
+
+      expect(createNoteSpy).not.toHaveBeenCalled();
+      expect(result.current.noteId).toBe(existingNote.id);
+      expect(result.current.state).toBe("recording");
+      // La durée déjà persistée (un segment de 4 s) est immédiatement visible.
+      expect(result.current.elapsedMs).toBe(4000);
+      expect(result.current.segmentCount).toBe(1);
+    });
+
+    it("noteId inexistant → échec propre, message français, aucune demande de permission micro", async () => {
+      setSupported("audio/webm;codecs=opus");
+      const store = createFakeNoteStore();
+      const getUserMedia = vi.fn();
+
+      const { result } = renderHook(() =>
+        useRecorder({ store, getUserMedia, isTypeSupported: (t) => FakeMediaRecorder.isTypeSupported(t) }),
+      );
+
+      await act(async () => {
+        await expect(result.current.start("fr", { noteId: "note-jamais-creee" })).rejects.toMatchObject(
+          { code: "note-not-found" },
+        );
+      });
+
+      expect(getUserMedia).not.toHaveBeenCalled();
+      expect(result.current.state).toBe("error");
+      expect(result.current.errorCode).toBe("note-not-found");
+      expect(result.current.errorMessage).toMatch(/n'existe plus/);
+    });
+
+    it("si le démarrage échoue après permission accordée, NE supprime PAS la note reprise (contrairement à une note fraîchement créée)", async () => {
+      setSupported("audio/webm;codecs=opus");
+      const store = createFakeNoteStore();
+      const existingNote = await store.createNote({ lang: "fr" });
+      const deleteNoteSpy = vi.spyOn(store, "deleteNote");
+      const stream = createFakeMediaStream();
+      const getUserMedia = vi.fn(async () => stream);
+      const createMediaRecorder = vi.fn(() => {
+        throw new Error("device error");
+      });
+
+      const { result } = renderHook(() =>
+        useRecorder({ store, getUserMedia, isTypeSupported: (t) => FakeMediaRecorder.isTypeSupported(t), createMediaRecorder }),
+      );
+
+      await act(async () => {
+        await expect(result.current.start("fr", { noteId: existingNote.id })).rejects.toBeTruthy();
+      });
+
+      expect(deleteNoteSpy).not.toHaveBeenCalled();
+      expect(await store.getNote(existingNote.id)).toBeDefined();
+    });
   });
 
   it("enregistre, segmente via RecorderEngine, et s'arrête proprement", async () => {

@@ -17,7 +17,13 @@ import {
   type CreateMediaRecorderFn,
   type RecorderEngineSnapshot,
 } from "@/lib/recorder/engine";
-import { RecorderError, toRecorderError } from "@/lib/recorder/errors";
+import {
+  noSupportedMimeTypeError,
+  noteNotFoundError,
+  RecorderError,
+  toRecorderError,
+  type RecorderErrorCode,
+} from "@/lib/recorder/errors";
 import { pickSupportedMimeType, type IsTypeSupportedFn } from "@/lib/recorder/mime-types";
 import { computeNormalizedLevel } from "@/lib/recorder/vu-meter";
 import type { LangSetting, NoteStore } from "@/types/notes";
@@ -37,6 +43,23 @@ export interface UseRecorderOptions {
   now?: () => number;
 }
 
+export interface StartRecordingOptions {
+  /**
+   * Reprend une note existante (déjà connue du `NoteStore`, avec ses
+   * segments déjà persistés — typiquement après un refresh en cours
+   * d'enregistrement) plutôt que d'en créer une nouvelle. `lang` est alors
+   * ignoré : la note conserve la langue choisie à sa création. La numérotation
+   * des segments et la durée cumulée repartent de l'existant, jamais de zéro
+   * (voir `RecorderEngine.start`).
+   *
+   * Trouver le `noteId` à reprendre est hors du périmètre de ce hook, qui ne
+   * dépend que de l'interface `NoteStore` : l'appelant (l'écran d'enregistrement)
+   * garde son propre marqueur de session active et lit le `NoteStore`
+   * directement pour retrouver la note interrompue et ses segments.
+   */
+  noteId?: string;
+}
+
 export interface UseRecorderResult {
   state: RecorderState;
   noteId: string | undefined;
@@ -46,11 +69,21 @@ export interface UseRecorderResult {
   elapsedMs: number;
   /** Message d'erreur en français, prêt à afficher tel quel. */
   errorMessage: string | undefined;
+  /**
+   * Code discriminant de la dernière erreur, à côté du message français :
+   * permet à l'UI d'afficher un conseil spécifique (ex. « aucun micro » vs
+   * « permission refusée ») sans analyser le texte du message.
+   */
+  errorCode: RecorderErrorCode | undefined;
   /** `false` si aucun mimeType audio n'est supporté par ce navigateur. */
   mimeTypeSupported: boolean;
   /** Niveau sonore normalisé (0..1) pour un VU-mètre ; 0 si non disponible. */
   level: number;
-  start: (lang: LangSetting) => Promise<void>;
+  /**
+   * Démarre un enregistrement. `lang` sert à créer une nouvelle note ; passer
+   * `{ noteId }` reprend une note existante à la place (voir `StartRecordingOptions`).
+   */
+  start: (lang: LangSetting, options?: StartRecordingOptions) => Promise<void>;
   pause: () => Promise<void>;
   resume: () => Promise<void>;
   stop: () => Promise<void>;
@@ -84,6 +117,7 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
   const [noteId, setNoteId] = useState<string | undefined>(undefined);
   const [snapshot, setSnapshot] = useState<RecorderEngineSnapshot>(EMPTY_SNAPSHOT);
   const [errorMessage, setErrorMessage] = useState<string | undefined>(undefined);
+  const [errorCode, setErrorCode] = useState<RecorderErrorCode | undefined>(undefined);
   const [mimeTypeSupported, setMimeTypeSupported] = useState(true);
   const [level, setLevel] = useState(0);
 
@@ -159,8 +193,9 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
   }, []);
 
   const start = useCallback(
-    async (lang: LangSetting) => {
+    async (lang: LangSetting, startOptions: StartRecordingOptions = {}) => {
       setErrorMessage(undefined);
+      setErrorCode(undefined);
       setMimeTypeSupported(true);
 
       // Vérifié avant toute demande de permission : inutile de faire prompter
@@ -169,12 +204,24 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
       if (!mimeType) {
         setMimeTypeSupported(false);
         setSnapshot((s) => ({ ...s, state: "error" }));
-        const err = new RecorderError(
-          "no-supported-mime-type",
-          "Ce navigateur ne permet pas d'enregistrer de l'audio ici. Essayez avec une version à jour de Chrome, Safari ou Firefox.",
-        );
+        const err = noSupportedMimeTypeError();
         setErrorMessage(err.message);
+        setErrorCode(err.code);
         throw err;
+      }
+
+      // Reprise d'une note existante : vérifiée avant la permission micro elle
+      // aussi, pour la même raison (RecorderEngine.start() revalide de toute
+      // façon, utile à qui instancie le moteur directement hors du hook).
+      if (startOptions.noteId) {
+        const existing = await store.getNote(startOptions.noteId);
+        if (!existing) {
+          setSnapshot((s) => ({ ...s, state: "error" }));
+          const err = noteNotFoundError();
+          setErrorMessage(err.message);
+          setErrorCode(err.code);
+          throw err;
+        }
       }
 
       let stream: MediaStream;
@@ -184,16 +231,23 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
         const err = toRecorderError(rawError);
         setSnapshot((s) => ({ ...s, state: "error" }));
         setErrorMessage(err.message);
+        setErrorCode(err.code);
         throw err;
       }
       streamRef.current = stream;
 
-      const note = await store.createNote({ lang });
-      setNoteId(note.id);
+      let recordingNoteId: string;
+      if (startOptions.noteId) {
+        recordingNoteId = startOptions.noteId;
+      } else {
+        const note = await store.createNote({ lang });
+        recordingNoteId = note.id;
+      }
+      setNoteId(recordingNoteId);
 
       const engine = new RecorderEngine({
         store,
-        noteId: note.id,
+        noteId: recordingNoteId,
         stream,
         mimeType,
         segmentMs: options.segmentMs,
@@ -205,16 +259,25 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
       engineRef.current = engine;
       engine.subscribe((next) => {
         setSnapshot(next);
-        if (next.error) setErrorMessage(next.error.message);
+        if (next.error) {
+          setErrorMessage(next.error.message);
+          setErrorCode(next.error.code);
+        }
       });
 
       try {
         await engine.start();
       } catch (rawError) {
         teardownStream();
-        await store.deleteNote(note.id).catch(() => {});
+        // Une note REPRISE préexistante ne doit jamais être supprimée sur un
+        // échec de démarrage : ses segments d'avant le refresh doivent
+        // survivre. On ne supprime que la note qu'on vient de créer ici même.
+        if (!startOptions.noteId) {
+          await store.deleteNote(recordingNoteId).catch(() => {});
+        }
         const err = rawError instanceof RecorderError ? rawError : toRecorderError(rawError);
         setErrorMessage(err.message);
+        setErrorCode(err.code);
         throw err;
       }
 
@@ -262,6 +325,7 @@ export function useRecorder(options: UseRecorderOptions): UseRecorderResult {
     segmentCount: snapshot.segmentCount,
     elapsedMs: snapshot.elapsedMs,
     errorMessage,
+    errorCode,
     mimeTypeSupported,
     level,
     start,
