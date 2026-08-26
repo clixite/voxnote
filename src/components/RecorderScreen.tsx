@@ -4,11 +4,13 @@ import { useEffect, useRef, useState } from "react";
 
 import type { CreateAudioContextFn, GetUserMediaFn } from "@/hooks/useRecorder";
 import { useRecorder } from "@/hooks/useRecorder";
+import { useUploadQueue, type WindowOnlineLike } from "@/hooks/useUploadQueue";
 import type { DocumentVisibilityLike, WakeLockLike } from "@/hooks/useWakeLock";
 import { useWakeLock } from "@/hooks/useWakeLock";
 import type { CreateMediaRecorderFn } from "@/lib/recorder/engine";
 import type { IsTypeSupportedFn } from "@/lib/recorder/mime-types";
 import { createIndexedDbNoteStore } from "@/lib/store/indexeddb";
+import type { TranscribeSegmentFn, UploadSegmentFn } from "@/lib/upload/queue";
 import type { NoteStore } from "@/types/notes";
 
 import {
@@ -22,11 +24,13 @@ import {
 import ErrorBanner from "./ErrorBanner";
 import { formatDuration } from "./format";
 import LevelMeter from "./LevelMeter";
+import OfflineQueueBanner from "./OfflineQueueBanner";
 import OtherTabNotice from "./OtherTabNotice";
 import PauseResumeButton from "./PauseResumeButton";
 import RecordButton from "./RecordButton";
 import ResumeNotice, { type ResumeNoticeInfo } from "./ResumeNotice";
 import TimerDisplay from "./TimerDisplay";
+import UploadProgress from "./UploadProgress";
 import WakeLockBanner from "./WakeLockBanner";
 
 export interface RecorderScreenProps {
@@ -44,6 +48,12 @@ export interface RecorderScreenProps {
   maxDurationMs?: number;
   wakeLock?: WakeLockLike;
   documentRef?: DocumentVisibilityLike;
+  /** Injectables pour les tests, transmis tels quels à `useUploadQueue`. */
+  uploadSegment?: UploadSegmentFn;
+  transcribeSegment?: TranscribeSegmentFn;
+  uploadConcurrency?: number;
+  isOnline?: () => boolean;
+  windowRef?: WindowOnlineLike;
 }
 
 // Pas de sélecteur de langue dans ce ticket (hors périmètre de l'écran
@@ -71,6 +81,15 @@ export default function RecorderScreen(props: RecorderScreenProps) {
     maxDurationMs: props.maxDurationMs,
   });
   const wakeLock = useWakeLock({ wakeLock: props.wakeLock, documentRef: props.documentRef });
+  const uploadQueue = useUploadQueue({
+    store,
+    noteId: recorder.noteId,
+    uploadSegment: props.uploadSegment,
+    transcribeSegment: props.transcribeSegment,
+    concurrency: props.uploadConcurrency,
+    isOnline: props.isOnline,
+    windowRef: props.windowRef,
+  });
 
   const [announcement, setAnnouncement] = useState("");
   const [interruptedNote, setInterruptedNote] = useState<ResumeNoticeInfo | null>(null);
@@ -80,6 +99,7 @@ export default function RecorderScreen(props: RecorderScreenProps) {
   } | null>(null);
   const previousStateRef = useRef(recorder.state);
   const previousSegmentCountRef = useRef(recorder.segmentCount);
+  const previousUploadStatusRef = useRef(uploadQueue.globalStatus);
 
   // Détection, au montage seulement, d'une note laissée active par une
   // session précédente (refresh, crash, onglet fermé, ou un AUTRE onglet).
@@ -181,6 +201,14 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       setAnnouncement(
         `Enregistrement arrêté. Durée totale : ${formatDuration(recorder.elapsedMs)}, ${recorder.segmentCount} segment${plural ? "s" : ""} sauvegardé${plural ? "s" : ""}.`,
       );
+      // Bascule explicite "recording" -> "processing" : c'est le seul
+      // moment où l'écran d'enregistrement sait que la session est
+      // réellement terminée. La file d'upload (useUploadQueue) prend le
+      // relais à partir de là pour dériver "done"/"partial"/"error" au fil
+      // des segments — voir le commentaire de tête de lib/upload/noteRollup.ts.
+      if (recorder.noteId) {
+        void store.updateNote(recorder.noteId, { status: "processing" }).catch(() => {});
+      }
     } else if (recorder.state === "error") {
       void wakeLock.release();
     }
@@ -188,7 +216,9 @@ export default function RecorderScreen(props: RecorderScreenProps) {
   }, [recorder.state]);
 
   // Nombre de segments sauvegardés : annoncé séparément du minuteur (qui, lui,
-  // ne doit jamais passer par aria-live — voir TimerDisplay).
+  // ne doit jamais passer par aria-live — voir TimerDisplay). Réveille aussi
+  // la file d'upload : un nouveau segment vient d'être écrit dans le
+  // NoteStore, inutile d'attendre son prochain passage périodique.
   useEffect(() => {
     const previous = previousSegmentCountRef.current;
     previousSegmentCountRef.current = recorder.segmentCount;
@@ -197,8 +227,40 @@ export default function RecorderScreen(props: RecorderScreenProps) {
       setAnnouncement(
         `${recorder.segmentCount} segment${plural ? "s" : ""} enregistré${plural ? "s" : ""} et sauvegardé${plural ? "s" : ""}.`,
       );
+      uploadQueue.notifyNewSegments();
     }
-  }, [recorder.segmentCount]);
+  }, [recorder.segmentCount, uploadQueue]);
+
+  // État global de l'envoi/transcription (ticket P3-5) : annoncé seulement à
+  // ses changements significatifs, jamais à chaque segment envoyé ou
+  // transcrit — même principe que le minuteur, délibérément hors
+  // `aria-live` (voir TimerDisplay et UploadProgress). L'annonce pour lecteur
+  // d'écran EST la synchronisation avec un système externe ici (comme pour
+  // les transitions de `recorder.state` juste au-dessus) : la règle
+  // `set-state-in-effect` ne voit que des appels `setAnnouncement`, sans
+  // pouvoir savoir qu'ils alimentent une région `aria-live` consommée par un
+  // lecteur d'écran, hors de portée du rendu React lui-même.
+  /* eslint-disable react-hooks/set-state-in-effect -- voir le commentaire ci-dessus */
+  useEffect(() => {
+    const previous = previousUploadStatusRef.current;
+    previousUploadStatusRef.current = uploadQueue.globalStatus;
+    if (previous === uploadQueue.globalStatus) return;
+
+    if (uploadQueue.globalStatus === "offline") {
+      setAnnouncement(
+        "Connexion perdue. Rien n'est perdu : l'envoi reprendra automatiquement au retour du réseau.",
+      );
+    } else if (previous === "offline") {
+      setAnnouncement("Connexion retrouvée : l'envoi reprend.");
+    } else if (uploadQueue.globalStatus === "idle" && previous === "syncing") {
+      setAnnouncement("Transcription terminée.");
+    } else if (uploadQueue.globalStatus === "error") {
+      setAnnouncement(
+        "Certains passages n'ont pas pu être envoyés. Vérifie les erreurs affichées ci-dessous.",
+      );
+    }
+  }, [uploadQueue.globalStatus]);
+  /* eslint-enable react-hooks/set-state-in-effect */
 
   function handleStart() {
     setInterruptedNote(null);
@@ -265,6 +327,10 @@ export default function RecorderScreen(props: RecorderScreenProps) {
 
       <WakeLockBanner show={showWakeLockBanner} />
 
+      <OfflineQueueBanner
+        show={uploadQueue.globalStatus === "offline" && uploadQueue.pendingCount > 0}
+      />
+
       <RecordButton
         state={recorder.state}
         disabled={!recorder.mimeTypeSupported}
@@ -286,6 +352,12 @@ export default function RecorderScreen(props: RecorderScreenProps) {
           {segmentsPlural ? "s" : ""} et sauvegardé{segmentsPlural ? "s" : ""}.
         </p>
       )}
+
+      <UploadProgress
+        progress={uploadQueue.noteProgress}
+        globalStatus={uploadQueue.globalStatus}
+        onRetry={uploadQueue.retrySegment}
+      />
     </div>
   );
 }
