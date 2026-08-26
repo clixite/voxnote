@@ -12,6 +12,7 @@ export type RecorderErrorCode =
   | "aborted"
   | "no-supported-mime-type"
   | "max-duration-reached"
+  | "note-not-found"
   | "unknown";
 
 export class RecorderError extends Error {
@@ -38,6 +39,8 @@ const MESSAGES: Record<RecorderErrorCode, string> = {
     "Ce navigateur ne permet pas d'enregistrer de l'audio ici. Essayez avec une version à jour de Chrome, Safari ou Firefox.",
   "max-duration-reached":
     "Durée maximale de 2 heures atteinte : l'enregistrement a été arrêté automatiquement.",
+  "note-not-found":
+    "Cette note n'existe plus : impossible de reprendre l'enregistrement. Démarrez-en un nouveau.",
   unknown: "Impossible d'accéder au microphone. Réessayez ou changez d'appareil.",
 };
 
@@ -85,4 +88,8 @@ export function noSupportedMimeTypeError(): RecorderError {
 
 export function maxDurationReachedError(): RecorderError {
   return new RecorderError("max-duration-reached", messageFor("max-duration-reached"));
+}
+
+export function noteNotFoundError(): RecorderError {
+  return new RecorderError("note-not-found", messageFor("note-not-found"));
 }

@@ -4,6 +4,7 @@ import {
   maxDurationReachedError,
   messageFor,
   noSupportedMimeTypeError,
+  noteNotFoundError,
   RecorderError,
   toRecorderError,
 } from "./errors";
@@ -55,6 +56,7 @@ describe("toRecorderError", () => {
       "aborted",
       "no-supported-mime-type",
       "max-duration-reached",
+      "note-not-found",
       "unknown",
     ] as const;
     for (const code of codes) {
@@ -74,5 +76,11 @@ describe("erreurs dédiées", () => {
     const error = maxDurationReachedError();
     expect(error.code).toBe("max-duration-reached");
     expect(error.message).toMatch(/2 heures/);
+  });
+
+  it("noteNotFoundError signale que la note n'existe plus, en français", () => {
+    const error = noteNotFoundError();
+    expect(error.code).toBe("note-not-found");
+    expect(error.message).toMatch(/n'existe plus/);
   });
 });
