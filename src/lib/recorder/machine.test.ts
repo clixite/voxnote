@@ -39,6 +39,10 @@ describe("machine à états de l'enregistreur", () => {
     expect(transition("error", "START")).toBe("recording");
   });
 
+  it("error → error sur ERROR (auto-boucle : une seconde erreur reste un état error propre)", () => {
+    expect(transition("error", "ERROR")).toBe("error");
+  });
+
   it.each<[RecorderState, "START" | "PAUSE" | "RESUME" | "STOP" | "ERROR"]>([
     ["idle", "PAUSE"],
     ["idle", "RESUME"],

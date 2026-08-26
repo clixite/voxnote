@@ -24,7 +24,11 @@ const ALLOWED_EVENTS: Record<RecorderState, ReadonlySet<RecorderEventType>> = {
   recording: new Set(["PAUSE", "STOP", "ERROR"]),
   paused: new Set(["RESUME", "STOP", "ERROR"]),
   stopped: new Set(),
-  error: new Set(["START"]),
+  // ERROR est accepté même depuis `error` (auto-boucle) : une seconde erreur
+  // pendant une tentative de reprise (ex. note introuvable après un premier
+  // échec) doit rester un RecorderError propre, jamais une
+  // InvalidRecorderTransitionError qui masquerait le vrai message.
+  error: new Set(["START", "ERROR"]),
 };
 
 const NEXT_STATE: Record<RecorderEventType, RecorderState> = {
