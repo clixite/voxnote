@@ -46,6 +46,8 @@ export interface DbNoteSnapshot {
   createdAt: number;
   durationMs: number;
   status: string;
+  /** Assemblé par la file d'upload (voir noteRollup.ts) ; `undefined` si rien n'a encore été transcrit. */
+  text: string | undefined;
 }
 
 export interface DbSegmentSnapshot {
@@ -57,11 +59,23 @@ export interface DbSegmentSnapshot {
   status: string;
   /** Taille du Blob audio, en octets : un `Blob` ne traverse pas `page.evaluate`, seule sa taille en sort. */
   size: number;
+  /** Présent dès que l'upload Blob a réussi, même si la transcription échoue ensuite. */
+  blobUrl: string | undefined;
+  /** Message français affiché à l'utilisateur, posé par la file en cas d'échec. */
+  error: string | undefined;
+  attempts: number;
+}
+
+export interface DbTranscriptSnapshot {
+  noteId: string;
+  seq: number;
+  text: string;
 }
 
 export interface DbSnapshot {
   notes: DbNoteSnapshot[];
   segments: DbSegmentSnapshot[];
+  transcripts: DbTranscriptSnapshot[];
 }
 
 /**
@@ -84,9 +98,38 @@ export interface DbSnapshot {
  * redéclenche que si la version demandée augmente par rapport à l'existant).
  * `indexedDB.databases()` permet de vérifier l'existence sans effet de bord.
  */
+/**
+ * `page.evaluate` échoue avec « Execution context was destroyed » quand une
+ * navigation survient pendant l'appel. Un cas réel, pas un artefact de
+ * test : cette version de Next.js déclenche une navigation MPA à elle
+ * seule autour de `context.setOffline()` (détection hors-ligne intégrée,
+ * voir `node_modules/next/dist/client/components/offline.js`, qui relance
+ * les prefetchs en attente au retour de connexion) — vérifié empiriquement,
+ * voir le rapport de ticket P3-7. Un nouvel essai après une navigation lit
+ * simplement l'état stabilisé, qui reste correct : IndexedDB survit à une
+ * navigation dans le même onglet.
+ */
+function isExecutionContextDestroyed(error: unknown): boolean {
+  return error instanceof Error && error.message.includes("Execution context was destroyed");
+}
+
 export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await readDbSnapshotOnce(page);
+    } catch (error) {
+      if (attempt === 3 || !isExecutionContextDestroyed(error)) throw error;
+      await page.waitForTimeout(200);
+    }
+  }
+  // Inatteignable (la boucle renvoie ou relève toujours avant), seulement
+  // pour satisfaire le vérificateur de type sur le chemin de sortie.
+  throw new Error("readDbSnapshot: nombre d'essais épuisé.");
+}
+
+function readDbSnapshotOnce(page: Page): Promise<DbSnapshot> {
   return page.evaluate(async (dbName): Promise<DbSnapshot> => {
-    const empty: DbSnapshot = { notes: [], segments: [] };
+    const empty: DbSnapshot = { notes: [], segments: [], transcripts: [] };
 
     if (typeof indexedDB.databases === "function") {
       const existing = await indexedDB.databases();
@@ -132,6 +175,7 @@ export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
       createdAt: number;
       durationMs: number;
       status: string;
+      text?: string;
     }
     interface RawSegment {
       id: string;
@@ -141,11 +185,20 @@ export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
       mimeType: string;
       status: string;
       blob: Blob;
+      blobUrl?: string;
+      error?: string;
+      attempts: number;
+    }
+    interface RawTranscript {
+      noteId: string;
+      seq: number;
+      text: string;
     }
 
-    const [rawNotes, rawSegments] = await Promise.all([
+    const [rawNotes, rawSegments, rawTranscripts] = await Promise.all([
       getAll<RawNote>("notes"),
       getAll<RawSegment>("segments"),
+      getAll<RawTranscript>("transcripts"),
     ]);
 
     db.close();
@@ -156,6 +209,7 @@ export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
         createdAt: note.createdAt,
         durationMs: note.durationMs,
         status: note.status,
+        text: note.text,
       })),
       segments: rawSegments
         .map((segment) => ({
@@ -166,6 +220,16 @@ export async function readDbSnapshot(page: Page): Promise<DbSnapshot> {
           mimeType: segment.mimeType,
           status: segment.status,
           size: segment.blob ? segment.blob.size : 0,
+          blobUrl: segment.blobUrl,
+          error: segment.error,
+          attempts: segment.attempts,
+        }))
+        .sort((a, b) => a.seq - b.seq),
+      transcripts: rawTranscripts
+        .map((transcript) => ({
+          noteId: transcript.noteId,
+          seq: transcript.seq,
+          text: transcript.text,
         }))
         .sort((a, b) => a.seq - b.seq),
     };
