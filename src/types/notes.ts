@@ -159,6 +159,35 @@ export interface NoteStore {
    */
   listPendingSegments(): Promise<Segment[]>;
 
+  /**
+   * Réserve un segment pour cet onglet, **atomiquement**, et dit si la
+   * réservation a été obtenue.
+   *
+   * Lire puis écrire en deux temps ne suffit pas : l'événement `online` est
+   * délivré simultanément à tous les onglets, qui lisent donc tous « libre »
+   * avant qu'aucun n'ait écrit, et réservent tous. Démontré en revue : six
+   * transcriptions facturées pour trois segments, de façon déterministe, sur
+   * le scénario même que la Phase 3 met en avant — la reprise après coupure
+   * réseau, quand le backlog est le plus gros.
+   *
+   * L'implémentation doit donc tenir dans **une seule transaction en écriture**
+   * (lecture, test, écriture), ce qu'IndexedDB sérialise par construction sur
+   * un même object store. C'est la primitive d'exclusion mutuelle qui manquait.
+   *
+   * Renvoie `false` si le segment est déjà réservé par un autre onglet et que
+   * cette réservation n'est pas périmée. Une réservation antérieure à
+   * `staleBefore` est reprenable : un onglet mort ne doit jamais bloquer un
+   * segment définitivement.
+   */
+  claimSegment(
+    segmentId: string,
+    tabId: string,
+    staleBefore: number,
+  ): Promise<boolean>;
+
+  /** Libère la réservation si elle appartient à cet onglet. Sinon ne fait rien. */
+  releaseSegment(segmentId: string, tabId: string): Promise<void>;
+
   putTranscript(transcript: Transcript): Promise<void>;
   listTranscripts(noteId: string): Promise<Transcript[]>;
 }
