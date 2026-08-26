@@ -31,13 +31,26 @@ function defaultTitle(createdAt: number): string {
 }
 
 /**
+ * Point d'injection de panne réservé aux tests : simule un échec de
+ * `deleteNote` après le retrait de la note, pour prouver que le rollback
+ * restaure l'état précédent plutôt que de laisser un audio orphelin (parité
+ * avec la garantie transactionnelle de `indexeddb.ts`). Sans effet si omis.
+ * Voir `memory.test.ts`.
+ */
+export interface MemoryNoteStoreTestHooks {
+  failDeleteNoteAt?: "segments" | "transcripts";
+}
+
+/**
  * Double en mémoire de `NoteStore`, pour les tests des modules qui consomment
  * l'interface sans avoir besoin d'une vraie base. Doit rester observablement
  * identique à `src/lib/store/indexeddb.ts` : mêmes tris, même atomicité de
  * suppression, mêmes erreurs. Voir `contract.test.ts`, qui fait passer les deux
  * implémentations par la même batterie d'assertions.
  */
-export function createMemoryNoteStore(): NoteStore {
+export function createMemoryNoteStore(
+  hooks: MemoryNoteStoreTestHooks = {},
+): NoteStore {
   const notes = new Map<string, Note>();
   const segments = new Map<string, StoredSegment>();
   const transcripts = new Map<string, Transcript>();
@@ -93,17 +106,48 @@ export function createMemoryNoteStore(): NoteStore {
     },
 
     async deleteNote(id: string): Promise<void> {
+      // Instantané pré-suppression : permet un rollback complet si une étape
+      // échoue en cours de route (voir `hooks.failDeleteNoteAt`), pour rester
+      // observablement aussi atomique que la transaction IndexedDB — une
+      // suppression à moitié faite est un manquement RGPD, pas un détail.
+      const noteSnapshot = notes.get(id);
+      const segmentSnapshots = [...segments.values()].filter(
+        (segment) => segment.noteId === id,
+      );
+      const transcriptSnapshots = [...transcripts.entries()].filter(
+        ([, transcript]) => transcript.noteId === id,
+      );
+
       // Idempotent : supprimer une note déjà absente n'est pas une erreur.
       notes.delete(id);
-      for (const segment of segments.values()) {
-        if (segment.noteId === id) {
+      try {
+        for (const segment of segmentSnapshots) {
+          if (hooks.failDeleteNoteAt === "segments") {
+            throw new Error(
+              "panne simulée : suppression des segments (test uniquement)",
+            );
+          }
           segments.delete(segment.id);
         }
-      }
-      for (const [key, transcript] of transcripts) {
-        if (transcript.noteId === id) {
+        for (const [key] of transcriptSnapshots) {
+          if (hooks.failDeleteNoteAt === "transcripts") {
+            throw new Error(
+              "panne simulée : suppression des transcripts (test uniquement)",
+            );
+          }
           transcripts.delete(key);
         }
+      } catch (err) {
+        if (noteSnapshot) {
+          notes.set(id, noteSnapshot);
+        }
+        for (const segment of segmentSnapshots) {
+          segments.set(segment.id, segment);
+        }
+        for (const [key, transcript] of transcriptSnapshots) {
+          transcripts.set(key, transcript);
+        }
+        throw err;
       }
     },
 
