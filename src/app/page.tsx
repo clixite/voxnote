@@ -1,4 +1,5 @@
 import Link from "next/link";
+import LogoutButton from "../components/LogoutButton";
 
 export default function HomePage() {
   return (
@@ -27,13 +28,15 @@ export default function HomePage() {
         </p>
       </main>
 
-      <footer className="px-6 pb-8 text-center text-xs text-slate-500">
+      <footer className="flex items-center justify-center gap-4 px-6 pb-8 text-center text-xs text-slate-500">
         <Link
           href="/confidentialite"
           className="underline decoration-slate-600 underline-offset-2 hover:text-slate-300"
         >
           Confidentialité
         </Link>
+        <span aria-hidden="true">·</span>
+        <LogoutButton />
       </footer>
     </div>
   );
