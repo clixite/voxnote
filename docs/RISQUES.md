@@ -49,24 +49,33 @@ automatique à 7 jours ; suppression d'une note qui efface audio **et** texte ; 
 confidentialité explicite sur l'hébergement. Arbitrage demandé au STOP de Phase 0
 (cf. `docs/PROVIDER-TRANSCRIPTION.md`).
 
-## 5. L'authentification devient la seule porte : elle doit tenir
-**Impact : moyen à élevé — une auth maison bâclée est pire qu'une app ouverte, parce qu'elle donne un faux sentiment de sécurité.**
-Depuis l'ajout des comptes (Phase 1bis), tout l'accès repose sur un cookie signé et
-un hash de mot de passe écrits pour ce projet. Les erreurs classiques : secret par
-défaut committé, rôle vérifié uniquement dans l'UI, énumération de comptes, pas de
-throttling sur la connexion, session non révocable.
+## 5. Le mot de passe unique devient la seule porte
+**Impact : moyen — une porte mal posée est pire qu'une porte absente, parce qu'elle rassure à tort.**
+Depuis la Phase 1bis, tout l'accès repose sur un hash en variable d'environnement et
+un cookie signé. Les façons de rater ça sont connues : secret par défaut committé,
+cookie signé avec une valeur devinable, mot de passe court soumis au bruteforce,
+route oubliée hors du middleware, hash renvoyé au client par mégarde.
 
-Parade : `AUTH_SECRET` obligatoire et vérifié au démarrage (aucune valeur par défaut) ;
-rôle vérifié côté serveur à chaque requête, jamais seulement en masquant un bouton ;
-réponse identique que l'email existe ou non ; throttling des tentatives ;
-`token_version` pour révoquer une session sans table à purger ; revue de sécurité
-dédiée et bloquante (P1B-9). Le périmètre reste volontairement étroit : pas de
-réinitialisation par email, pas d'OAuth — moins de surface, moins de failles.
+Parade : `AUTH_SECRET` et `APP_PASSWORD_HASH` obligatoires et vérifiés au démarrage,
+sans valeur de repli ; cookie httpOnly + Secure + SameSite ; test qui parcourt toutes
+les routes `/api/*` sans cookie et exige un 401 ; empreinte du hash dans le JWT pour
+que changer le mot de passe déconnecte tout le monde ; revue de sécurité dédiée et
+bloquante (P1B-5). Le périmètre reste volontairement minuscule : pas de comptes, pas
+d'emails, pas d'OAuth — presque aucune surface d'attaque.
 
-Effet de bord positif : le risque d'abus de quota disparaît en grande partie. Sans
-compte, on ne consomme plus une seconde de transcription. Le rate limiting (P3-1,
-P3-3, P5-3) et le plafond de 2 h par note restent en place comme seconde ceinture,
-au cas où un compte légitime dérape.
+Deux limites à assumer plutôt qu'à cacher :
+- **Le throttling est best-effort.** Un compteur en mémoire ne survit pas à un cold
+  start et ne se partage pas entre instances serverless. Le vrai frein est la lenteur
+  de bcrypt, qui ne protège que si le mot de passe est long. **Consigne : une phrase
+  de passe de plusieurs mots, pas un mot de huit lettres.**
+- **On ne révoque pas individuellement.** Changer le mot de passe le change pour tout
+  le monde, et on ne sait pas qui s'est connecté. C'est le prix du « pas de base de
+  données ». Le jour où il faut retirer l'accès à une seule personne, il faut de vrais
+  comptes, donc une base : c'est une décision v2, pas une rustine.
+
+Effet de bord positif : le risque d'abus de quota disparaît en grande partie. Sans le
+mot de passe, on ne consomme plus une seconde de transcription. Le rate limiting
+(P3-1, P3-3, P5-3) et le plafond de 2 h par note restent comme seconde ceinture.
 
 ---
 
@@ -76,9 +85,9 @@ au cas où un compte légitime dérape.
 - **Tarifs des providers** : ordres de grandeur, à revalider avant de figer le défaut.
 - **Dérive de périmètre** : « et si on ajoutait un résumé IA ? » — hors périmètre v1,
   à refuser jusqu'à la livraison de la Phase 6.
-- **Malentendu « j'ai un compte, donc mes notes me suivent »** : faux. Les notes
+- **Malentendu « je me connecte, donc mes notes me suivent »** : faux. Les notes
   restent sur l'appareil. À écrire noir sur blanc dans l'UI et le README, sous peine
   d'une mauvaise surprise le jour où l'utilisateur cherche sur son PC une note
   dictée sur son téléphone. La synchronisation est un chantier v2.
-- **Dépendance de provisioning** : la base Postgres et le store Blob doivent être
-  créés côté Vercel avant que la preview ne soit pleinement fonctionnelle.
+- **Dépendance de provisioning** : le store Blob et les variables d'environnement
+  doivent être créés côté Vercel avant que la preview ne soit pleinement fonctionnelle.

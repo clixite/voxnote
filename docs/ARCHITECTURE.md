@@ -92,72 +92,68 @@ persistant hors le Blob (pas de base de données en v1).
 
 | Décision | Raison | Alternative écartée |
 |---|---|---|
-| Base de données réduite aux comptes | Imposée par l'auth ; les notes restent locales | Notes en base — chantier v2, hors périmètre |
-| Auth maison (cookie signé) plutôt que NextAuth | 2 tables, 1 rôle, ~10 comptes : une dépendance de plus n'apporte rien | NextAuth/Auth.js — dimensionné pour l'OAuth multi-fournisseurs |
+| Aucune base de données | Un mot de passe partagé se vérifie contre une variable d'environnement | Table `users` — imposerait Postgres pour zéro bénéfice ici |
+| Mot de passe unique plutôt que des comptes | Ferme la porte, ce qui est le besoin réel ; pas d'identité à gérer | NextAuth/Auth.js — dimensionné pour l'OAuth multi-fournisseurs |
 | Upload client direct vers Blob | Limite de body ~4,5 Mo des fonctions serverless | Proxy via route API — casse au-delà de 4,5 Mo |
 | Segmentation ~5 min | Borne la perte, contourne la limite de taille par fichier, permet la progression | Fichier unique — tout ou rien |
 | IndexedDB avant upload | Un refresh ou un crash ne perd que le segment en cours | État en mémoire — perte totale |
 | Interface `TranscriptionProvider` | Bascule UE ↔ US par variable d'environnement, sans refactor | Appel direct au SDK — verrou fournisseur |
 | Blob privé + TTL 7 jours | RGPD : minimisation et limitation de conservation | Blob public — URL devinable, fuite |
 
-## Authentification et administration
+## Accès protégé par mot de passe unique
 
 L'application est fermée : aucune page utile, aucune route API n'est accessible sans
-session valide. Il n'y a pas d'inscription publique.
+session valide. Il n'y a ni compte, ni inscription, ni base de données — un seul mot
+de passe partagé, dont seul le **hash** existe côté serveur, dans une variable
+d'environnement Vercel.
 
 ```
-   visiteur ──▶ middleware ──┬── session valide ? ──▶ page demandée
+   visiteur ──▶ middleware ──┬── cookie de session valide ? ──▶ page demandée
                              │
                              └── non ──▶ /login
-                                          │ POST /api/auth/login (email + mot de passe)
-                                          │   └─ argon/bcrypt.compare vs users.password_hash
-                                          │   └─ throttling par email + IP (table login_attempts)
+                                          │ POST /api/auth/login { password }
+                                          │   └─ bcrypt.compare(password, APP_PASSWORD_HASH)
+                                          │   └─ throttling best-effort en mémoire
                                           ▼
                                   cookie `vox_session` (JWT HS256, jose)
                                   httpOnly · Secure · SameSite=Lax · 30 j
-                                  { sub, role, v }   ← `v` = token_version, permet la révocation
+                                  { pv }   ← empreinte courte du hash en vigueur
 ```
 
-Rôles : `admin` et `user`. Seul `admin` accède à `/admin` — vérifié **côté serveur à
-chaque requête**, jamais seulement en masquant un bouton dans l'UI.
+Points de conception :
 
-Bootstrap : le tout premier administrateur vient des variables d'environnement
-`ADMIN_EMAIL` + `ADMIN_PASSWORD_HASH` (un hash, jamais un mot de passe en clair).
-Sans lui, personne ne pourrait créer le premier compte. Tous les comptes suivants
-sont créés depuis `/admin`.
+- **Le mot de passe n'est jamais stocké en clair**, ni dans le dépôt, ni en base, ni
+  dans un fichier : seul `APP_PASSWORD_HASH` (bcrypt) existe, en variable
+  d'environnement. Un script `pnpm hash-password` génère le hash localement.
+- **Changer le mot de passe = changer la variable d'environnement**, puis redéployer.
+  Le JWT porte `pv`, une empreinte courte du hash en vigueur : dès que le hash change,
+  toutes les sessions émises avec l'ancien deviennent invalides. C'est la révocation
+  du pauvre, et elle suffit — sans aucune table de sessions à purger.
+- **`AUTH_SECRET` est obligatoire** et vérifié au démarrage. Aucune valeur par défaut,
+  jamais : un secret par défaut committé permettrait de forger un cookie valide et
+  rendrait le mot de passe décoratif.
+- **Throttling best-effort** : compteur en mémoire par IP dans l'instance serverless.
+  Il ne survit pas à un cold start et ne couvre pas plusieurs instances — c'est assumé.
+  Le vrai frein est ailleurs : bcrypt est lent par construction (~100 ms par essai),
+  ce qui rend le bruteforce en ligne peu rentable, à condition que le mot de passe
+  soit long. D'où la consigne : une phrase de passe, pas un mot de huit lettres.
+- **Aucune donnée personnelle n'est créée par l'auth** : pas d'email, pas de compte,
+  pas de journal nominatif. Le RGPD s'en trouve simplifié, pas compliqué.
 
-Révocation : désactiver ou supprimer un compte, ou réinitialiser son mot de passe,
-incrémente `token_version`. Les sessions déjà émises deviennent invalides à la
-requête suivante, sans table de sessions à purger.
-
-### Modèle de données serveur (Postgres — Neon)
-
-```
-users          { id uuid pk, email citext unique, password_hash text,
-                 role text check(admin|user), is_active bool,
-                 token_version int, must_change_password bool,
-                 created_at, last_login_at }
-
-login_attempts { id, email, ip, at, success }   -- throttling, purgé à 24 h
-```
-
-C'est tout. Aucune note, aucun transcript, aucun audio en base : les notes restent
-en IndexedDB sur l'appareil, l'audio reste dans Blob avec un TTL de 7 jours.
-
-Tests : le store utilisateurs est requêté en SQL simple derrière un module unique,
-et les tests tournent sur une base Postgres en mémoire — aucun service externe
-n'est requis pour que la CI passe.
+Contrepartie assumée : on ne sait pas *qui* s'est connecté, et révoquer l'accès d'une
+seule personne est impossible — changer le mot de passe le change pour tout le monde.
+Pour un cercle de quelques personnes de confiance, c'est le bon compromis. Le jour où
+ça ne l'est plus, la marche suivante est une vraie table d'utilisateurs, donc une base.
 
 ## Sécurité et RGPD
 - Clés API uniquement en variables d'environnement Vercel, jamais exposées au client.
 - Blobs privés, URL non énumérable, purge cron quotidienne des audios de plus de 7 jours.
 - `DELETE /api/notes/[id]` supprime le blob ; le client supprime segments et transcript
   en local dans la même transaction logique.
-- Toutes les routes `/api/*` (hors `auth/login`) exigent une session valide : sans
-  compte, impossible de consommer le quota du provider de transcription.
-- Rate limiting malgré tout sur `/api/transcribe` et `/api/blob/upload-url` : un compte
-  légitime compromis ou un script maladroit ne doit pas vider le quota.
-- Mots de passe hachés (jamais chiffrés, jamais stockés en clair) ; throttling des
-  tentatives de connexion ; messages de connexion volontairement identiques que l'email
-  existe ou non.
+- Toutes les routes `/api/*` (hors `auth/login` et le cron) exigent une session valide :
+  sans le mot de passe, impossible de consommer le quota du provider de transcription.
+- Rate limiting malgré tout sur `/api/transcribe` et `/api/blob/upload-url` : le mot de
+  passe peut circuler, un script maladroit ne doit pas vider le quota.
+- Mot de passe haché (bcrypt), jamais stocké en clair nulle part ; throttling
+  best-effort des tentatives de connexion.
 - Page `/confidentialite` : ce qui est envoyé, à qui, où, combien de temps.

@@ -4,19 +4,24 @@ PWA d'enregistrement vocal et de transcription. Trois choses, très bien :
 enregistrer, transcrire, restituer le texte (copier / partager / exporter).
 
 ## Périmètre v1 (strict)
-Dans le périmètre : enregistrement segmenté avec pause/reprise, transcription
-serveur (fr, nl, en, détection auto), liste de notes, transcript éditable,
-Copier, Partager (Web Share + fallback mailto), export .txt et .md.
+Dans le périmètre : accès protégé par un mot de passe unique partagé, enregistrement
+segmenté avec pause/reprise, transcription serveur (fr, nl, en, détection auto),
+liste de notes, transcript éditable, Copier, Partager (Web Share + fallback mailto),
+export .txt et .md.
 
-Hors périmètre v1, à refuser : comptes utilisateurs, résumés IA, diarisation,
-traduction, app native. Local-first, pas d'auth.
+Hors périmètre v1, à refuser : comptes utilisateurs individuels, inscription, page
+d'administration, base de données, OAuth, synchronisation des notes entre appareils,
+résumés IA, diarisation, traduction, app native. Les notes restent local-first.
 
 ## Stack imposée
 - Next.js (App Router), TypeScript strict, Tailwind, déployé sur Vercel.
 - PWA : manifest + service worker (vérifier la lib à jour via Context7).
 - Client : IndexedDB (idb). Serveur : Vercel Blob, upload client direct.
 - Transcription : interface `TranscriptionProvider`, implémentations `groq`,
-  `openai`, `gladia`. Sélection par `TRANSCRIBE_PROVIDER`.
+  `openai`, `gladia`. Sélection par `TRANSCRIBE_PROVIDER`. Défaut retenu : `groq`.
+- Accès : mot de passe unique haché dans `APP_PASSWORD_HASH`, cookie de session JWT
+  signé avec `AUTH_SECRET` (`jose`). Aucune base de données.
+- PWA : `@serwist/next` (next-pwa n'est plus maintenu).
 - Tests : vitest (unit) + Playwright (chromium desktop, chromium mobile, webkit mobile).
 - CI : GitHub Actions (lint, typecheck, tests) sur chaque PR.
 
@@ -29,6 +34,9 @@ traduction, app native. Local-first, pas d'auth.
 5. RGPD : supprimer une note supprime audio + texte ; purge auto des audios > 7 jours ;
    page confidentialité.
 6. Interface en français, messages d'erreur compréhensibles par un non-technicien.
+7. Aucune page ni route API accessible sans session valide, hors `/login`,
+   `/confidentialite`, les assets et le cron. Aucun secret n'a de valeur par défaut :
+   `AUTH_SECRET` ou `APP_PASSWORD_HASH` manquant = échec explicite au démarrage.
 
 ## Organisation
 La session principale est ORCHESTRATEUR : elle découpe, délègue, vérifie, intègre.
