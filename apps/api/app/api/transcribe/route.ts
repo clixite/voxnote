@@ -34,8 +34,9 @@ export async function POST(request: Request) {
   if (!Array.isArray(segments) || segments.length === 0) {
     return NextResponse.json({ error: 'Aucun segment reçu.' }, { status: 400, headers: CORS });
   }
+  const baseMime = (t: string) => t.split(';')[0].trim();
   for (const s of segments) {
-    if (!s.url || !s.mimeType || !ALLOWED.includes(s.mimeType)) {
+    if (!s.url || !s.mimeType || !ALLOWED.includes(baseMime(s.mimeType))) {
       return NextResponse.json({ error: 'Segment invalide.' }, { status: 400, headers: CORS });
     }
   }

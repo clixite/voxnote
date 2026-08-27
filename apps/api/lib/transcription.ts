@@ -6,7 +6,12 @@ class GroqProvider implements TranscriptionProvider {
   constructor(private apiKey: string) {}
 
   async transcribe(audio: Blob, opts: { mimeType: string; lang?: string }): Promise<string> {
-    const ext = opts.mimeType.includes('mp4') ? 'm4a' : opts.mimeType.includes('webm') ? 'webm' : 'ogg';
+    const mt = opts.mimeType.split(';')[0].toLowerCase();
+    let ext = 'webm';
+    if (mt.includes('mp4')) ext = 'm4a';
+    else if (mt.includes('mpeg')) ext = 'mp3';
+    else if (mt.includes('ogg')) ext = 'ogg';
+    else if (mt.includes('wav')) ext = 'wav';
     const form = new FormData();
     form.append('file', audio, 'audio.' + ext);
     form.append('model', 'whisper-large-v3-turbo');
