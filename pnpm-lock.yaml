@@ -59,9 +59,6 @@ importers:
       '@mozartec/capacitor-microphone':
         specifier: ^7.1.0
         version: 7.1.0(@capacitor/core@8.5.0)
-      '@voxnote/shared':
-        specifier: workspace:*
-        version: link:../../packages/shared
       react:
         specifier: ^19.2.8
         version: 19.2.8
