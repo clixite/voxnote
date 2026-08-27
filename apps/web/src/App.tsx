@@ -31,19 +31,13 @@ export default function App() {
     await refresh();
   };
 
-  const handleStop = async () => {
-    if (!activeId) return;
-    const now = Date.now();
-    const title = `Note du ${new Date(now).toLocaleString('fr-FR')}`;
-    const existing = notes.find((n) => n.id === activeId);
-    if (existing) await saveNote({ ...existing, title, status: 'processing', updatedAt: now });
-    setActiveId(null);
-    await refresh();
-
+  const processNote = async (noteId: string) => {
     setBusy(true);
     await requestKeepAwake();
     try {
-      const segments = await getSegments(activeId);
+      const existing = await getNote(noteId);
+      if (existing) await saveNote({ ...existing, status: 'processing', error: undefined, updatedAt: Date.now() });
+      const segments = await getSegments(noteId);
       if (segments.length === 0) throw new Error('Aucun segment enregistré.');
       const uploaded: { url: string; mimeType: string; index: number }[] = [];
       for (const seg of segments) {
@@ -54,23 +48,34 @@ export default function App() {
           mimeType = 'audio/wav';
         } catch {}
         const url = await uploadSegment(
-          `notes/${activeId}/${seg.index}.${extFor(mimeType)}`,
+          `notes/${noteId}/${seg.index}.${extFor(mimeType)}`,
           blob,
           mimeType,
         );
         uploaded.push({ url, mimeType, index: seg.index });
       }
       const transcript = await transcribe(uploaded);
-      const note = await getNote(activeId);
-      if (note) await saveNote({ ...note, transcript, status: 'done', updatedAt: Date.now() });
+      const note = await getNote(noteId);
+      if (note) await saveNote({ ...note, transcript, status: 'done', error: undefined, updatedAt: Date.now() });
     } catch (e) {
-      const note = await getNote(activeId);
+      const note = await getNote(noteId);
       if (note) await saveNote({ ...note, status: 'error', error: e instanceof Error ? e.message : String(e), updatedAt: Date.now() });
     } finally {
       releaseKeepAwake();
       setBusy(false);
       await refresh();
     }
+  };
+
+  const handleStop = async () => {
+    if (!activeId) return;
+    const now = Date.now();
+    const title = `Note du ${new Date(now).toLocaleString('fr-FR')}`;
+    const existing = notes.find((n) => n.id === activeId);
+    if (existing) await saveNote({ ...existing, title, status: 'processing', updatedAt: now });
+    setActiveId(null);
+    await refresh();
+    await processNote(activeId);
   };
 
   const copy = async (id: string, text: string) => {
@@ -124,7 +129,10 @@ export default function App() {
                 <div className="mt-1 text-sm text-indigo-400">Transcription en cours…</div>
               )}
               {n.status === 'error' && (
-                <div className="mt-1 text-sm text-red-400">{n.error ?? 'Échec de la transcription.'}</div>
+                <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="text-sm text-red-400">{n.error ?? 'Échec de la transcription.'}</span>
+                  <button onClick={() => processNote(n.id)} className="text-xs text-indigo-400 hover:text-indigo-300">Réessayer</button>
+                </div>
               )}
               {n.status === 'done' && n.transcript && (
                 <>

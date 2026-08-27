@@ -8,14 +8,14 @@ export function extFor(mimeType: string): string {
   return 'bin';
 }
 
-async function withRetry<T>(fn: () => Promise<T>, attempts = 3): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, attempts = 5): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i < attempts; i++) {
     try {
       return await fn();
     } catch (e) {
       lastErr = e;
-      await new Promise((r) => setTimeout(r, 800 * (i + 1)));
+      await new Promise((r) => setTimeout(r, 1000 * (i + 1)));
     }
   }
   throw lastErr;
