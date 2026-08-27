@@ -38,23 +38,21 @@ class GroqProvider implements TranscriptionProvider {
 
 // Extrait un texte diarisé depuis la réponse Gladia (parsing défensif).
 function extractDiarizedText(poll: any): string {
-  const result = poll?.result ?? poll?.data ?? poll;
-  const transcription = Array.isArray(result?.transcription) ? result.transcription : [];
-  const segments = transcription.map((seg: any) => {
-    if (typeof seg?.transcript === 'string' && seg.transcript.trim()) {
-      const sp = seg.speaker ?? seg?.words?.[0]?.speaker;
-      const t = seg.transcript.trim();
-      return sp !== undefined ? `[Locuteur ${sp + 1}] ${t}` : t;
-    }
-    const words = Array.isArray(seg?.words) ? seg.words : [];
-    if (words.length) {
-      const t = words.map((w: any) => w.word).join(' ');
-      const sp = words[0]?.speaker;
-      return sp !== undefined ? `[Locuteur ${sp + 1}] ${t}` : t;
-    }
-    return '';
-  });
-  return segments.filter(Boolean).join('\n');
+  const t = poll?.result?.transcription ?? poll?.data?.transcription ?? poll?.transcription;
+  const utts = Array.isArray(t?.utterances) ? t.utterances : [];
+  if (utts.length) {
+    return utts
+      .map((u: any) => {
+        const text = (u?.text ?? '').trim();
+        if (!text) return '';
+        const sp = u?.speaker;
+        return sp !== undefined ? `[Locuteur ${sp + 1}] ${text}` : text;
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+  if (typeof t?.full_transcript === 'string' && t.full_transcript.trim()) return t.full_transcript.trim();
+  return '';
 }
 
 class GladiaProvider implements TranscriptionProvider {
