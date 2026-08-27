@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { del, get } from '@vercel/blob';
 import { getProvider } from '@/lib/transcription';
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 const CORS = {
   'Access-Control-Allow-Origin': '*',
@@ -43,14 +43,14 @@ export async function POST(request: Request) {
   try {
     const provider = getProvider();
     const ordered = [...segments].sort((a, b) => a.index - b.index);
-    const texts: string[] = [];
-    for (const seg of ordered) {
-      const result = await get(seg.url, { access: 'private' });
-      if (!result || !result.stream) throw new Error('Lecture du segment ' + seg.index + ' impossible.');
-      const audioBlob = await new Response(result.stream).blob();
-      const text = await provider.transcribe(audioBlob, { mimeType: seg.mimeType, lang: body.lang });
-      texts.push(text);
-    }
+    const texts = await Promise.all(
+      ordered.map(async (seg) => {
+        const result = await get(seg.url, { access: 'private' });
+        if (!result || !result.stream) throw new Error('Lecture du segment ' + seg.index + ' impossible.');
+        const audioBlob = await new Response(result.stream).blob();
+        return provider.transcribe(audioBlob, { mimeType: seg.mimeType, lang: body.lang });
+      }),
+    );
 
     await Promise.all(segments.map((s) => del(s.url).catch(() => {})));
 
