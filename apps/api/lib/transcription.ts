@@ -29,7 +29,7 @@ class GroqProvider implements TranscriptionProvider {
     });
     if (!res.ok) {
       const errText = await res.text();
-      throw new Error('Transcription Groq échouée (' + res.status + ') : ' + errText.slice(0, 200));
+      throw new Error('Transcription Groq échouée (' + res.status + ') : ' + errText.slice(0, 160) + ' | audio: ' + audio.size + ' octets, ' + opts.mimeType);
     }
     const data = (await res.json()) as { text?: string };
     return data.text ?? '';

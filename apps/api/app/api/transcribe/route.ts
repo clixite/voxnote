@@ -54,6 +54,7 @@ export async function POST(request: Request) {
         const result = await get(seg.url, { access: 'private' });
         if (!result || !result.stream) throw new Error('Lecture du segment ' + seg.index + ' impossible.');
         const audioBlob = await new Response(result.stream).blob();
+        if (audioBlob.size < 500) throw new Error('Segment ' + seg.index + ' : audio vide (' + audioBlob.size + ' octets).');
         return provider.transcribe(audioBlob, { mimeType: seg.mimeType, lang: body.lang });
       }),
     );
