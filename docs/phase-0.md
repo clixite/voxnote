@@ -34,7 +34,7 @@ Comptes / auth, résumés IA, diarisation, traduction, app native. **Local-first
 
 ## 2. Architecture
 
-> Note : la décision §7 (Capacitor v1) fait du frontend une **SPA Vite + React** chargée dans un shell Capacitor, la PWA restant la cible desktop/web. Le schéma ci-dessous représente le cœur (web + API) ; l'enregistrement natif iOS/Android passe par @capawesome/capacitor-audio-recorder.
+> Note : la décision §7 (Capacitor v1) fait du frontend une **SPA Vite + React** chargée dans un shell Capacitor, la PWA restant la cible desktop/web. Le schéma ci-dessous représente le cœur (web + API) ; l'enregistrement iOS/Android passe par @mozartec/capacitor-microphone (foreground, gratuit).
 
 ~~~text
 ┌────────────────────────────────────────────────┐
@@ -167,7 +167,7 @@ export interface Note {
 
 ## 6. Risques top 5
 
-1. **Enregistrement iPhone écran verrouillé** (prob. haute, impact fort) — aucune web app n'enregistre écran éteint sur iOS. Mitigation : v1 = wake lock (Android/desktop) + bandeau + conseil réglage ; v2 = wrap Capacitor. **À valider comme acceptation d'usage dès maintenant.**
+1. **Enregistrement iPhone écran verrouillé** (accepté comme limitation v1) — aucune solution gratuite ne le permet. Mitigation : wake lock (Android/desktop) + bandeau (iOS) ; v2 = Capawesome payant ou plugin custom.
 2. **Dépassement de coût transcription** (prob. moyenne, impact moyen) — plafonds 2 h/note + 20 h/mois + alerte + rate limiting.
 3. **Compatibilité PWA / App Router** (prob. moyenne, impact moyen) — next-pwa non maintenu → @serwist/next, vérifié via web_search, test install dès T-02.
 4. **Éviction IndexedDB iOS (7 j sans visite)** (prob. moyenne, impact fort) — upload immédiat après enregistrement + message utilisateur.
@@ -175,11 +175,13 @@ export interface Note {
 
 ---
 
-## 7. Décision produit (validée après cadrage)
+## 7. Décision produit (révisée)
 
-**« L'iPhone verrouillé doit pouvoir enregistrer »** → la v1 n'est plus une PWA pure : c'est une **app hybride Capacitor** (iOS + Android), la PWA étant conservée comme cible desktop/web.
+**v1 = app hybride Capacitor** (iOS + Android) + PWA desktop/web.
 
-- **Enregistrement** : sur iOS/Android, plugin natif **@capawesome/capacitor-audio-recorder** (AVAudioRecorder + AVAudioSession, mode background \`audio\` dans Info.plist) → enregistrement écran verrouillé / arrière-plan. Sur web/desktop, repli MediaRecorder (comportement inchangé).
+- **Enregistrement** : plugin gratuit **@mozartec/capacitor-microphone** (iOS/Android, AAC .m4a, foreground) + repli MediaRecorder sur web. **Écran verrouillé abandonné en v1** : le seul plugin qui le supporte (Capawesome) est payant, aucun plugin gratuit/maintenu ne le couvre (vérifié).
+- **Mitigation arrière-plan** : wake lock (Android/desktop) + bandeau « garde l'écran allumé » (iOS).
+- **v2 (si besoin)** : Capawesome (payant) ou mini-plugin custom (Swift AVAudioRecorder + UIBackgroundModes: audio).
 - **Conséquence stack frontend** : le shell Capacitor charge un build statique → le frontend devient une **SPA Vite + React + TS + Tailwind** (une seule base pour PWA + Capacitor). L'API reste **Next.js (route handlers)** sur Vercel, inchangée.
 - **Implications** : compte Apple Developer ($99/an) + soumission App Store ; tests sur **vrais appareils** (le verrouillage / arrière-plan ne se simule pas en Playwright) ; Playwright reste pour l'UI / la transcription web.
 - **Nouveau risque** : développement natif (plugin, provisioning, signatures) — mitigé par un plugin éprouvé + un build CI dédié.
