@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Recorder } from './components/Recorder';
 import { deleteNote, getNote, getSegments, listNotes, saveNote, type NoteRecord } from './lib/db';
 import { extFor, transcribe, uploadSegment } from './lib/api';
+import { toWav } from './lib/audio/toWav';
 import { requestKeepAwake, releaseKeepAwake } from './lib/keepAwake';
 
 export default function App() {
@@ -46,12 +47,18 @@ export default function App() {
       if (segments.length === 0) throw new Error('Aucun segment enregistré.');
       const uploaded: { url: string; mimeType: string; index: number }[] = [];
       for (const seg of segments) {
+        let blob = seg.blob;
+        let mimeType = seg.mimeType;
+        try {
+          blob = await toWav(seg.blob);
+          mimeType = 'audio/wav';
+        } catch {}
         const url = await uploadSegment(
-          `notes/${activeId}/${seg.index}.${extFor(seg.mimeType)}`,
-          seg.blob,
-          seg.mimeType,
+          `notes/${activeId}/${seg.index}.${extFor(mimeType)}`,
+          blob,
+          mimeType,
         );
-        uploaded.push({ url, mimeType: seg.mimeType, index: seg.index });
+        uploaded.push({ url, mimeType, index: seg.index });
       }
       const transcript = await transcribe(uploaded);
       const note = await getNote(activeId);
