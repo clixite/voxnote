@@ -5,7 +5,7 @@ import { extFor, transcribe, uploadSegment } from './lib/api';
 import { toWav } from './lib/audio/toWav';
 import { requestKeepAwake, releaseKeepAwake } from './lib/keepAwake';
 
-function formatTime(ms: number): string {
+function formatClock(ms: number): string {
   const s = Math.floor(ms / 1000);
   const m = Math.floor(s / 60);
   const h = Math.floor(m / 60);
@@ -42,14 +42,7 @@ export default function App() {
 
   const startNew = async () => {
     const id = crypto.randomUUID();
-    const note: NoteRecord = {
-      id,
-      title: '',
-      transcript: '',
-      status: 'recording',
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
+    const note: NoteRecord = { id, title: '', transcript: '', status: 'recording', createdAt: Date.now(), updatedAt: Date.now() };
     await saveNote(note);
     setActiveId(id);
     await refresh();
@@ -72,26 +65,14 @@ export default function App() {
           blob = await toWav(seg.blob);
           mimeType = 'audio/wav';
         } catch {}
-        const url = await uploadSegment(
-          `notes/${noteId}/${seg.index}.${extFor(mimeType)}`,
-          blob,
-          mimeType,
-        );
+        const url = await uploadSegment(`notes/${noteId}/${seg.index}.${extFor(mimeType)}`, blob, mimeType);
         uploaded.push({ url, mimeType, index: seg.index });
       }
       const transcript = await transcribe(uploaded);
       const note = await getNote(noteId);
       if (note) {
         const title = transcript.trim() ? deriveTitle(transcript, note.createdAt) : note.title;
-        await saveNote({
-          ...note,
-          transcript,
-          status: 'done',
-          error: undefined,
-          durationMs: totalMs,
-          title,
-          updatedAt: Date.now(),
-        });
+        await saveNote({ ...note, transcript, status: 'done', error: undefined, durationMs: totalMs, title, updatedAt: Date.now() });
       }
     } catch (e) {
       const note = await getNote(noteId);
@@ -128,15 +109,18 @@ export default function App() {
   };
 
   return (
-    <main className="min-h-screen bg-neutral-950 text-neutral-100">
-      <div className="mx-auto max-w-md px-4 py-6">
-        <header className="mb-8 flex items-center justify-between">
-          <h1 className="text-xl font-semibold">VoxNote</h1>
-          <span className="text-xs text-neutral-500">Enregistrer · Transcrire · Copier</span>
+    <main className="min-h-screen">
+      <div className="mx-auto max-w-md px-5 pb-12 pt-8">
+        <header className="mb-10 flex items-end justify-between">
+          <div>
+            <h1 className="font-display text-2xl font-semibold tracking-tight">VoxNote</h1>
+            <p className="text-xs text-neutral-500">Enregistrer · Transcrire · Copier</p>
+          </div>
+          <div className={`h-2 w-2 rounded-full ${online ? 'bg-emerald-400' : 'bg-neutral-600'}`} title={online ? 'En ligne' : 'Hors ligne'} />
         </header>
 
         {!online && (
-          <div className="mb-4 rounded-lg border border-amber-700/40 bg-amber-900/20 p-3 text-sm text-amber-300">
+          <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-300">
             Hors ligne — l'enregistrement fonctionne, la transcription attendra le réseau.
           </div>
         )}
@@ -144,10 +128,10 @@ export default function App() {
         {activeId ? (
           <Recorder noteId={activeId} onStop={handleStop} />
         ) : (
-          <div className="flex flex-col items-center gap-4 py-8">
+          <div className="flex flex-col items-center gap-5 py-14">
             <button
               onClick={startNew}
-              className="flex h-20 w-20 items-center justify-center rounded-full bg-indigo-500 text-2xl transition-colors hover:bg-indigo-600"
+              className="flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-br from-indigo-500 to-indigo-700 text-4xl text-white shadow-xl shadow-indigo-900/40 transition-transform hover:scale-105 active:scale-95"
               aria-label="Nouvel enregistrement"
             >
               🎙️
@@ -160,32 +144,25 @@ export default function App() {
 
         <ul className="mt-8 space-y-3">
           {notes.map((n) => (
-            <li key={n.id} className="rounded-lg border border-neutral-800 p-3">
-              <div className="flex items-center justify-between">
-                <div className="font-medium">{n.title || 'Sans titre'}</div>
-                <div className="flex items-center gap-3">
-                  {n.durationMs ? <span className="text-xs text-neutral-500">{formatTime(n.durationMs)}</span> : null}
-                  <button onClick={() => remove(n.id)} className="text-xs text-neutral-500 hover:text-red-400">
-                    Suppr.
-                  </button>
+            <li key={n.id} className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+              <div className="flex items-center justify-between gap-2">
+                <div className="font-medium text-neutral-100">{n.title || 'Sans titre'}</div>
+                <div className="flex shrink-0 items-center gap-3">
+                  {n.durationMs ? <span className="text-xs text-neutral-500">{formatClock(n.durationMs)}</span> : null}
+                  <button onClick={() => remove(n.id)} className="text-xs text-neutral-600 hover:text-red-400">Suppr.</button>
                 </div>
               </div>
-              {n.status === 'processing' && <div className="mt-1 text-sm text-indigo-400">Transcription en cours…</div>}
+              {n.status === 'processing' && <div className="mt-2 text-sm text-indigo-400">Transcription en cours…</div>}
               {n.status === 'error' && (
                 <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1">
                   <span className="text-sm text-red-400">{n.error ?? 'Échec de la transcription.'}</span>
-                  <button onClick={() => processNote(n.id)} className="text-xs text-indigo-400 hover:text-indigo-300">
-                    Réessayer
-                  </button>
+                  <button onClick={() => processNote(n.id)} className="text-xs font-medium text-indigo-400 hover:text-indigo-300">Réessayer</button>
                 </div>
               )}
               {n.status === 'done' && n.transcript && (
                 <>
-                  <p className="mt-2 whitespace-pre-wrap text-sm text-neutral-200">{n.transcript}</p>
-                  <button
-                    onClick={() => copy(n.id, n.transcript)}
-                    className="mt-2 rounded-full bg-indigo-500 px-4 py-1.5 text-xs"
-                  >
+                  <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-neutral-200">{n.transcript}</p>
+                  <button onClick={() => copy(n.id, n.transcript)} className="mt-3 rounded-full bg-indigo-500 px-4 py-1.5 text-xs font-medium text-white hover:bg-indigo-400">
                     {copiedId === n.id ? 'Copié ✓' : 'Copier'}
                   </button>
                 </>
@@ -195,18 +172,18 @@ export default function App() {
           {notes.length === 0 && <li className="text-center text-sm text-neutral-600">Aucune note pour l'instant.</li>}
         </ul>
 
-        <footer className="mt-10 border-t border-neutral-800 pt-4 text-center text-xs text-neutral-500">
+        <footer className="mt-12 border-t border-white/10 pt-4 text-center text-xs text-neutral-600">
           <button onClick={() => setShowPrivacy((v) => !v)} className="hover:text-neutral-300">Confidentialité</button>
         </footer>
 
         {showPrivacy && (
-          <section className="mt-6 rounded-lg border border-neutral-800 p-4 text-sm text-neutral-300">
+          <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-4 text-sm text-neutral-300">
             <h2 className="mb-2 font-semibold">Vos données</h2>
             <ul className="list-disc space-y-1 pl-5">
-              <li>L'audio est enregistré en local et supprimé juste après la transcription.</li>
-              <li>Le texte transcrit est stocké uniquement sur votre appareil (IndexedDB).</li>
-              <li>La transcription est réalisée par un fournisseur tiers (Groq) ; l'audio n'est pas conservé au-delà.</li>
-              <li>Aucun compte, aucun cookie de suivi.</li>
+              <li>L'audio est supprimé juste après la transcription.</li>
+              <li>Le texte transcrit reste uniquement sur votre appareil.</li>
+              <li>Transcription par un tiers (Groq), aucune rétention au-delà.</li>
+              <li>Aucun compte ni cookie de suivi.</li>
             </ul>
           </section>
         )}

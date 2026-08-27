@@ -1,4 +1,5 @@
 import { put } from '@vercel/blob';
+import { rateLimit } from '@/lib/rateLimit';
 import { NextResponse } from 'next/server';
 
 const CORS = {
@@ -12,6 +13,10 @@ export async function OPTIONS() {
 }
 
 export async function POST(request: Request) {
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'anon';
+  if (!rateLimit('upload:' + ip, 20, 60_000)) {
+    return NextResponse.json({ error: 'Trop de requêtes.' }, { status: 429, headers: CORS });
+  }
   try {
     const form = await request.formData();
     const file = form.get('file') as File | null;

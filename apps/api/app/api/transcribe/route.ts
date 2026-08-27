@@ -1,6 +1,7 @@
 import { NextResponse } from 'next/server';
 import { del, get } from '@vercel/blob';
 import { getProvider } from '@/lib/transcription';
+import { rateLimit } from '@/lib/rateLimit';
 
 export const maxDuration = 300;
 
@@ -23,6 +24,10 @@ interface SegmentInput {
 const ALLOWED = ['audio/mp4', 'audio/webm', 'audio/mpeg', 'audio/wav', 'audio/ogg'];
 
 export async function POST(request: Request) {
+  const ip = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'anon';
+  if (!rateLimit('transcribe:' + ip, 10, 60_000)) {
+    return NextResponse.json({ error: 'Trop de requêtes, réessayez dans un instant.' }, { status: 429, headers: CORS });
+  }
   let body: { segments?: SegmentInput[]; lang?: string };
   try {
     body = await request.json();
