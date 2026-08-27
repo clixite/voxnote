@@ -6,6 +6,7 @@ export interface NoteRecord {
   transcript: string;
   status: 'recording' | 'processing' | 'done' | 'error';
   error?: string;
+  durationMs?: number;
   createdAt: number;
   updatedAt: number;
 }
