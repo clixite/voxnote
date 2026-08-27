@@ -20,7 +20,8 @@ export async function toWav(blob: Blob): Promise<Blob> {
   src.start();
   const rendered = await off.startRendering();
   const data = rendered.getChannelData(0);
-  const dataSize = frames * 2;
+  const frames2 = rendered.length;
+  const dataSize = frames2 * 2;
   const wav = new ArrayBuffer(44 + dataSize);
   const view = new DataView(wav);
   writeString(view, 0, 'RIFF');
@@ -37,7 +38,7 @@ export async function toWav(blob: Blob): Promise<Blob> {
   writeString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
   let o = 44;
-  for (let i = 0; i < frames; i++) {
+  for (let i = 0; i < frames2; i++) {
     const s = Math.max(-1, Math.min(1, data[i]));
     view.setInt16(o, s < 0 ? s * 0x8000 : s * 0x7fff, true);
     o += 2;
