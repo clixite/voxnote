@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { Recorder } from './components/Recorder';
 import { deleteNote, getNote, getSegments, listNotes, saveNote, type NoteRecord } from './lib/db';
 import { extFor, transcribe, uploadSegment } from './lib/api';
+import { requestKeepAwake, releaseKeepAwake } from './lib/keepAwake';
 
 export default function App() {
   const [notes, setNotes] = useState<NoteRecord[]>([]);
@@ -39,6 +40,7 @@ export default function App() {
     await refresh();
 
     setBusy(true);
+    await requestKeepAwake();
     try {
       const segments = await getSegments(activeId);
       if (segments.length === 0) throw new Error('Aucun segment enregistré.');
@@ -58,6 +60,7 @@ export default function App() {
       const note = await getNote(activeId);
       if (note) await saveNote({ ...note, status: 'error', error: e instanceof Error ? e.message : String(e), updatedAt: Date.now() });
     } finally {
+      releaseKeepAwake();
       setBusy(false);
       await refresh();
     }
