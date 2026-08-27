@@ -98,7 +98,7 @@ class GladiaProvider implements TranscriptionProvider {
 }
 
 export function getProvider(): TranscriptionProvider {
-  const name = process.env.TRANSCRIBE_PROVIDER ?? 'groq';
+  const name = process.env.TRANSCRIBE_PROVIDER ?? (process.env.GLADIA_API_KEY ? 'gladia' : 'groq');
   if (name === 'groq') {
     const key = process.env.GROQ_API_KEY;
     if (!key) throw new Error('GROQ_API_KEY non configurée sur le serveur.');
