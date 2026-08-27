@@ -111,6 +111,9 @@ export class Recorder {
         resolve(this.segments);
       };
       if (this.mr.state === 'paused') this.mr.resume();
+      try {
+        this.mr.requestData();
+      } catch {}
       this.mr.stop();
     });
   }
