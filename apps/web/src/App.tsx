@@ -61,10 +61,12 @@ export default function App() {
       for (const seg of segments) {
         let blob = seg.blob;
         let mimeType = seg.mimeType;
-        try {
-          blob = await toWav(seg.blob);
-          mimeType = 'audio/wav';
-        } catch {}
+        if (seg.mimeType.includes('ogg')) {
+          try {
+            blob = await toWav(seg.blob);
+            mimeType = 'audio/wav';
+          } catch {}
+        }
         const url = await uploadSegment(`notes/${noteId}/${seg.index}.${extFor(mimeType)}`, blob, mimeType);
         uploaded.push({ url, mimeType, index: seg.index });
       }

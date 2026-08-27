@@ -11,8 +11,9 @@ function writeString(view: DataView, offset: number, str: string) {
 export async function toWav(blob: Blob): Promise<Blob> {
   const ac = getCtx();
   const buffer = await ac.decodeAudioData(await blob.arrayBuffer());
+  if (!buffer.length) throw new Error('audio décodé vide');
   const sr = 16000;
-  const frames = Math.ceil(buffer.duration * sr);
+  const frames = Math.max(1, Math.round((buffer.length * sr) / buffer.sampleRate));
   const off = new OfflineAudioContext(1, frames, sr);
   const src = off.createBufferSource();
   src.buffer = buffer;
