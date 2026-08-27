@@ -14,6 +14,7 @@
     "@capacitor/core": "^8.5.0",
     "@capacitor/ios": "^8.5.0",
     "@mozartec/capacitor-microphone": "^7.1.0",
+    "idb": "^8.0.3",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "workbox-window": "^7.4.1"
