@@ -19,7 +19,7 @@ export async function POST(request: Request) {
     if (!file || !pathname) {
       return NextResponse.json({ error: 'Fichier ou pathname manquant.' }, { status: 400, headers: CORS });
     }
-    const blob = await put(pathname, file, { access: 'public', addRandomSuffix: true, contentType: file.type });
+    const blob = await put(pathname, file, { access: 'private', addRandomSuffix: true, contentType: file.type });
     return NextResponse.json({ url: blob.url }, { headers: CORS });
   } catch (e) {
     return NextResponse.json({ error: e instanceof Error ? e.message : 'Erreur upload.' }, { status: 500, headers: CORS });

@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { del } from '@vercel/blob';
+import { del, get } from '@vercel/blob';
 import { getProvider } from '@/lib/transcription';
 
 export const maxDuration = 120;
@@ -45,9 +45,9 @@ export async function POST(request: Request) {
     const ordered = [...segments].sort((a, b) => a.index - b.index);
     const texts: string[] = [];
     for (const seg of ordered) {
-      const res = await fetch(seg.url);
-      if (!res.ok) throw new Error('Lecture du segment ' + seg.index + ' impossible (' + res.status + ').');
-      const audioBlob = await res.blob();
+      const result = await get(seg.url, { access: 'private' });
+      if (!result || !result.stream) throw new Error('Lecture du segment ' + seg.index + ' impossible.');
+      const audioBlob = await new Response(result.stream).blob();
       const text = await provider.transcribe(audioBlob, { mimeType: seg.mimeType, lang: body.lang });
       texts.push(text);
     }
