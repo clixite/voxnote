@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Recorder, type SegmentChunk } from '../lib/audio/recorder';
 import { saveSegment } from '../lib/db';
+import { requestKeepAwake, releaseKeepAwake } from '../lib/keepAwake';
 
 export type RecorderState = 'idle' | 'starting' | 'recording' | 'paused';
 
@@ -45,6 +46,7 @@ export function useRecorder(noteId: string | null) {
         setSegmentCount((c) => c + 1);
       });
       recorderRef.current = r;
+      await requestKeepAwake();
       await r.start();
       startAtRef.current = Date.now();
       pausedTotalRef.current = 0;
@@ -75,6 +77,7 @@ export function useRecorder(noteId: string | null) {
     cancelAnimationFrame(rafRef.current);
     const r = recorderRef.current;
     recorderRef.current = null;
+    releaseKeepAwake();
     const segments = r ? await r.stop() : [];
     setLevel(0);
     setState('idle');
