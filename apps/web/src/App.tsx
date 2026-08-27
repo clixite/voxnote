@@ -56,6 +56,7 @@ export default function App() {
       if (existing) await saveNote({ ...existing, status: 'processing', error: undefined, updatedAt: Date.now() });
       const segments = await getSegments(noteId);
       if (segments.length === 0) throw new Error('Aucun segment enregistré.');
+      if (segments.every((s) => s.blob.size < 1000)) throw new Error("Enregistrement vide — le micro n'a rien capté. Vérifie l'autorisation micro et que le VU-mètre bouge pendant l'enregistrement.");
       const totalMs = segments.reduce((s, seg) => s + seg.durationMs, 0);
       const uploaded: { url: string; mimeType: string; index: number }[] = [];
       for (const seg of segments) {
