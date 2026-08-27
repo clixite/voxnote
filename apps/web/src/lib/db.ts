@@ -5,6 +5,7 @@ export interface NoteRecord {
   title: string;
   transcript: string;
   status: 'recording' | 'processing' | 'done' | 'error';
+  error?: string;
   createdAt: number;
   updatedAt: number;
 }

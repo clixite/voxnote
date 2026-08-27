@@ -54,12 +54,13 @@ export function Recorder({ noteId, onStop }: Props) {
 
       <button
         onClick={handlePress}
+        disabled={state === 'starting'}
         aria-label={isRecording ? 'Arrêter' : 'Enregistrer'}
         className={`flex h-20 w-20 items-center justify-center rounded-full text-2xl transition-colors ${
-          isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-indigo-500 hover:bg-indigo-600'
+          isRecording ? 'bg-red-500 hover:bg-red-600' : 'bg-indigo-500 hover:bg-indigo-600 disabled:opacity-60'
         }`}
       >
-        {isRecording ? '■' : '🎙️'}
+        {state === 'starting' ? '…' : isRecording ? '■' : '🎙️'}
       </button>
 
       {error && <p className="text-sm text-red-400">{error}</p>}

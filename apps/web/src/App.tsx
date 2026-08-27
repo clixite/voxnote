@@ -54,9 +54,9 @@ export default function App() {
       const transcript = await transcribe(uploaded);
       const note = await getNote(activeId);
       if (note) await saveNote({ ...note, transcript, status: 'done', updatedAt: Date.now() });
-    } catch {
+    } catch (e) {
       const note = await getNote(activeId);
-      if (note) await saveNote({ ...note, status: 'error', updatedAt: Date.now() });
+      if (note) await saveNote({ ...note, status: 'error', error: e instanceof Error ? e.message : String(e), updatedAt: Date.now() });
     } finally {
       setBusy(false);
       await refresh();
@@ -114,7 +114,7 @@ export default function App() {
                 <div className="mt-1 text-sm text-indigo-400">Transcription en cours…</div>
               )}
               {n.status === 'error' && (
-                <div className="mt-1 text-sm text-red-400">Échec de la transcription.</div>
+                <div className="mt-1 text-sm text-red-400">{n.error ?? 'Échec de la transcription.'}</div>
               )}
               {n.status === 'done' && n.transcript && (
                 <>

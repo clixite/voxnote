@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { Recorder, type SegmentChunk } from '../lib/audio/recorder';
 import { saveSegment } from '../lib/db';
 
-export type RecorderState = 'idle' | 'recording' | 'paused';
+export type RecorderState = 'idle' | 'starting' | 'recording' | 'paused';
 
 export function useRecorder(noteId: string | null) {
   const [state, setState] = useState<RecorderState>('idle');
@@ -27,7 +27,9 @@ export function useRecorder(noteId: string | null) {
   }, []);
 
   const start = useCallback(async () => {
+    if (recorderRef.current) return;
     setError(null);
+    setState('starting');
     try {
       const r = new Recorder(async (segment) => {
         if (noteId) {
@@ -51,7 +53,9 @@ export function useRecorder(noteId: string | null) {
       setState('recording');
       rafRef.current = requestAnimationFrame(tick);
     } catch (e) {
+      recorderRef.current = null;
       setError(e instanceof Error ? e.message : "Impossible d'accéder au micro.");
+      setState('idle');
     }
   }, [noteId, tick]);
 

@@ -25,11 +25,17 @@ interface AudioSession {
   audioContext: AudioContext;
 }
 
+let sharedAudioContext: AudioContext | null = null;
+function getAudioContext(): AudioContext {
+  if (!sharedAudioContext) sharedAudioContext = new AudioContext();
+  return sharedAudioContext;
+}
+
 async function openAudioSession(): Promise<AudioSession> {
   const mimeType = detectMimeType();
   if (!mimeType) throw new Error("L'enregistrement audio n'est pas supporté par ce navigateur.");
   const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  const audioContext = new AudioContext();
+  const audioContext = getAudioContext();
   if (audioContext.state === 'suspended') await audioContext.resume();
   const source = audioContext.createMediaStreamSource(stream);
   const analyser = audioContext.createAnalyser();
@@ -121,9 +127,6 @@ export class Recorder {
   private cleanup(): void {
     try {
       this.session?.stream.getTracks().forEach((t) => t.stop());
-    } catch {}
-    try {
-      void this.session?.audioContext.close();
     } catch {}
     this.session = null;
     this.mr = null;
