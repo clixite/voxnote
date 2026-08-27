@@ -64,10 +64,11 @@ class GladiaProvider implements TranscriptionProvider {
 
     // 1) Upload du fichier vers Gladia
     const upForm = new FormData();
-    upForm.append('audio', audio, 'audio.' + ext);
+    const file = new File([audio], 'audio.' + ext, { type: opts.mimeType });
+    upForm.append('audio', file);
     const upRes = await fetch('https://api.gladia.io/v2/upload', { method: 'POST', headers, body: upForm });
     const upData = (await upRes.json()) as any;
-    if (!upRes.ok) throw new Error('Gladia upload (' + upRes.status + ') : ' + JSON.stringify(upData).slice(0, 200));
+    if (!upRes.ok) throw new Error('Gladia upload (' + upRes.status + ') : ' + JSON.stringify(upData).slice(0, 180) + ' | audio: ' + opts.mimeType + ', ' + audio.size + ' octets');
     const audioUrl = upData.audio_url;
     if (!audioUrl) throw new Error('Gladia : URL audio introuvable.');
 
