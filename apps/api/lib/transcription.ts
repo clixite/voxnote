@@ -61,34 +61,38 @@ class GladiaProvider implements TranscriptionProvider {
   constructor(private apiKey: string) {}
 
   async transcribe(audio: Blob, opts: { mimeType: string; lang?: string }): Promise<string> {
+    const headers = { 'x-gladia-key': this.apiKey };
     const ext = audioExt(opts.mimeType);
-    const form = new FormData();
-    form.append('audio', audio, 'audio.' + ext);
-    form.append('diarization', 'true');
-    if (opts.lang && opts.lang !== 'auto') form.append('language', opts.lang);
 
+    // 1) Upload du fichier vers Gladia
+    const upForm = new FormData();
+    upForm.append('audio', audio, 'audio.' + ext);
+    const upRes = await fetch('https://api.gladia.io/v2/upload', { method: 'POST', headers, body: upForm });
+    const upData = (await upRes.json()) as any;
+    if (!upRes.ok) throw new Error('Gladia upload (' + upRes.status + ') : ' + JSON.stringify(upData).slice(0, 200));
+    const audioUrl = upData.audio_url;
+    if (!audioUrl) throw new Error('Gladia : URL audio introuvable.');
+
+    // 2) Lancement de la transcription (diarisation)
+    const body: any = { audio_url: audioUrl, diarization: true };
+    if (opts.lang && opts.lang !== 'auto') body.language_config = { languages: [opts.lang] };
     const init = await fetch('https://api.gladia.io/v2/transcription', {
       method: 'POST',
-      headers: { 'x-gladia-key': this.apiKey },
-      body: form,
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
     });
     const job = (await init.json()) as any;
-    if (!init.ok) {
-      throw new Error('Gladia init échouée (' + init.status + ') : ' + JSON.stringify(job).slice(0, 200));
-    }
+    if (!init.ok) throw new Error('Gladia init (' + init.status + ') : ' + JSON.stringify(job).slice(0, 200));
     const id = job.id ?? job.transcription_id;
-    if (!id) throw new Error('Gladia : identifiant de transcription manquant.');
+    if (!id) throw new Error('Gladia : id manquant.');
 
+    // 3) Polling du résultat
     for (let i = 0; i < 60; i++) {
       await new Promise((r) => setTimeout(r, 2000));
-      const res = await fetch('https://api.gladia.io/v2/transcription/' + id, {
-        headers: { 'x-gladia-key': this.apiKey },
-      });
+      const res = await fetch('https://api.gladia.io/v2/transcription/' + id, { headers });
       const poll = (await res.json()) as any;
       if (poll?.status === 'done') return extractDiarizedText(poll);
-      if (poll?.status === 'error') {
-        throw new Error('Gladia : ' + (poll?.error?.message ?? 'erreur de transcription'));
-      }
+      if (poll?.status === 'error') throw new Error('Gladia : ' + (poll?.error?.message ?? 'erreur de transcription'));
     }
     throw new Error('Gladia : délai dépassé.');
   }
