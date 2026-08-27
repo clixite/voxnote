@@ -1,4 +1,4 @@
-export const SEGMENT_MS = 5 * 60 * 1000;
+export const SEGMENT_MS = 3 * 60 * 1000;
 
 export interface SegmentChunk {
   blob: Blob;

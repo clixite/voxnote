@@ -1,5 +1,3 @@
-import { upload } from '@vercel/blob/client';
-
 export const API_URL: string = import.meta.env.VITE_API_URL ?? 'https://voxnote-api.vercel.app';
 
 export function extFor(mimeType: string): string {
@@ -11,12 +9,14 @@ export function extFor(mimeType: string): string {
 }
 
 export async function uploadSegment(pathname: string, blob: Blob, mimeType: string): Promise<string> {
-  const result = await upload(pathname, blob, {
-    access: 'public',
-    handleUploadUrl: API_URL + '/api/upload',
-    contentType: mimeType,
-  });
-  return result.url;
+  const file = new File([blob], 'audio', { type: mimeType });
+  const form = new FormData();
+  form.append('file', file);
+  form.append('pathname', pathname);
+  const res = await fetch(API_URL + '/api/upload', { method: 'POST', body: form });
+  const data = (await res.json()) as { url?: string; error?: string };
+  if (!res.ok) throw new Error(data.error ?? "Upload de l'audio échoué.");
+  return data.url ?? '';
 }
 
 export interface TranscribeSegmentInput {
